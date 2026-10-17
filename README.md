@@ -56,8 +56,17 @@ switched off on its own, and the thresholds can be tuned:
 ## Compatibility
 - **SPT 4.1.6** (tested; later 4.1.x patches should work). Client-only: no server mod.
 - **Dependencies**: none beyond SPT.
-- Works alongside **Ragdoll Kinetics** and **SAIN**.
+- **Tested together** (the author's own install):
+  - **HollywoodFX 3.0.0** (with HollywoodGraphics): works. Both add blood, but they complement each other:
+    RealTargets does the realistic layer (wounds, bleeding, pools, dismemberment), HollywoodFX its cinematic sprays
+    and splatter on top. Run both at defaults. Both also push corpses when shot; if bodies move more than you like,
+    lower HollywoodFX's `Ragdoll Force Multiplier` or RealTargets' `Impacts > Push strength`.
+  - **Ragdoll Kinetics**: works. Keep RealTargets' Flinch off with it (the default): the two reactions stack into an
+    over-the-top one.
+  - **SAIN**, BigBrain, UI Fixes, LootNet, AmandsSense, Dynamic Maps: no conflicts.
+- **Reported by players:** TraumaCore runs fine.
 - **Fika is not supported.**
+- Tried it with another mod? Say so on the [Forge page](https://sp-mod.com/mod/3165/realtargets), works or not.
 - Performance: the mod's own CPU time averages about 0.1 ms per frame in a busy raid. Blood marks, pools and
   gore pieces have fixed caps, so a long raid doesn't pile them up.
 
