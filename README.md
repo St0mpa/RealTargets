@@ -8,6 +8,12 @@ Purely visual: damage, bleeding HP loss, death and AI stay vanilla EFT (and SAIN
 
 **Download:** [The Forge](https://sp-mod.com/mod/3165/realtargets) or [GitHub Releases](https://github.com/St0mpa/RealTargets/releases).
 
+<p>
+  <img src="images/card-1-limbs.png" width="32%" alt="40 mm grenade: a severed lower leg, a thrown helmet and a blood pool">
+  <img src="images/card-2-exits.png" width="32%" alt="Exit wounds on a back and a skull burst">
+  <img src="images/card-3-pellets.png" width="32%" alt="A tight buckshot pattern, each pellet its own wound, blood soaking down the shirt">
+</p>
+
 ## Features
 - **Entry and exit wounds** on clothing and skin, placed where each round actually went through. Exits are
   bigger and ragged, scaled by the bullet's energy.
