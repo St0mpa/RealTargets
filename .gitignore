@@ -1,0 +1,12 @@
+# Build output
+bin/
+obj/
+dist/
+.vs/
+.idea/
+*.user
+*.suo
+
+# Game / SPT / BepInEx assemblies are referenced from your SPT install, never committed
+*.dll
+*.pdb

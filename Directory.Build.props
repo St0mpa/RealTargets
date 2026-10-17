@@ -1,0 +1,11 @@
+<Project>
+  <!--
+    Paths to the local SPT install. Game/SPT/BepInEx assemblies are referenced from here,
+    never copied into the repo. Override per machine: dotnet build -p:SptDir=D:\SPT
+  -->
+  <PropertyGroup>
+    <SptDir Condition="'$(SptDir)' == ''">A:\Games\SPT-4.1</SptDir>
+    <ManagedDir>$(SptDir)\EscapeFromTarkov_Data\Managed</ManagedDir>
+    <BepInExDir>$(SptDir)\BepInEx</BepInExDir>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,108 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- SPT 4.1.3 client plugins (spt-core, spt-reflection) target netstandard2.1 on BepInEx 5. -->
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>RealTargets</AssemblyName>
+    <RootNamespace>RealTargets</RootNamespace>
+    <!-- Keep in sync with PluginInfo.Version. -->
+    <Version>1.0.0</Version>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+    <DeployDir>$(BepInExDir)\plugins\RealTargets</DeployDir>
+    <Configurations>Debug;Release;Public</Configurations>
+  </PropertyGroup>
+
+  <!--
+    Public build = the Forge release (docs/project/roadmap.md "Release track"): compiles out the test tools
+    (test kit mail, ghost mode, F3/F5/F6 lab and its BigBrain dependency, debug overlay) and the performance
+    tools ([Perf] log, F7 benchmark); chatty logs default off. Output in bin/Public, apart from the dev build.
+      dotnet build -c Public                    # public DLL
+      dotnet build -c Public -p:Package=true    # + install-ready zip in dist/
+  -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Public'">
+    <DefineConstants>$(DefineConstants);PUBLIC</DefineConstants>
+    <Optimize>true</Optimize>
+    <DebugType>none</DebugType>
+    <Public>true</Public>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(Public)' == 'true'">
+    <Compile Remove="Lab\**" />
+    <Compile Remove="Patches\GhostModePatches.cs;Patches\ModalInputPatches.cs" />
+    <Compile Remove="Diagnostics\DebugOverlay.cs;Diagnostics\Perf.cs" />
+    <None Remove="Lab\**" />
+  </ItemGroup>
+
+  <!-- Referenced in place from the SPT install; Private=false so none are copied to bin/. -->
+  <ItemGroup>
+    <Reference Include="Assembly-CSharp" HintPath="$(ManagedDir)\Assembly-CSharp.dll" Private="false" />
+    <Reference Include="Comfort" HintPath="$(ManagedDir)\Comfort.dll" Private="false" />
+    <Reference Include="Comfort.Unity" HintPath="$(ManagedDir)\Comfort.Unity.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(ManagedDir)\UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(ManagedDir)\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine.PhysicsModule" HintPath="$(ManagedDir)\UnityEngine.PhysicsModule.dll" Private="false" />
+    <Reference Include="UnityEngine.AnimationModule" HintPath="$(ManagedDir)\UnityEngine.AnimationModule.dll" Private="false" />
+    <Reference Include="AnimationSystem.Types" HintPath="$(ManagedDir)\AnimationSystem.Types.dll" Private="false" />
+    <Reference Include="UnityEngine.ParticleSystemModule" HintPath="$(ManagedDir)\UnityEngine.ParticleSystemModule.dll" Private="false" />
+    <Reference Include="UnityEngine.IMGUIModule" HintPath="$(ManagedDir)\UnityEngine.IMGUIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.TextRenderingModule" HintPath="$(ManagedDir)\UnityEngine.TextRenderingModule.dll" Private="false" />
+    <Reference Include="UnityEngine.InputLegacyModule" HintPath="$(ManagedDir)\UnityEngine.InputLegacyModule.dll" Private="false" />
+    <Reference Include="BepInEx" HintPath="$(BepInExDir)\core\BepInEx.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(BepInExDir)\core\0Harmony.dll" Private="false" />
+    <Reference Include="spt-reflection" HintPath="$(BepInExDir)\plugins\spt\spt-reflection.dll" Private="false" />
+    <Reference Include="spt-common" HintPath="$(BepInExDir)\plugins\spt\spt-common.dll" Private="false" />
+    <Reference Include="Newtonsoft.Json" HintPath="$(ManagedDir)\Newtonsoft.Json.dll" Private="false" />
+  </ItemGroup>
+
+  <!-- BigBrain only for the lab's dummy layer (dev build). -->
+  <ItemGroup Condition="'$(Public)' != 'true'">
+    <Reference Include="DrakiaXYZ-BigBrain" HintPath="$(BepInExDir)\plugins\DrakiaXYZ-BigBrain.dll" Private="false" />
+  </ItemGroup>
+
+  <!-- Test kit ships next to the DLL. -->
+  <ItemGroup Condition="'$(Public)' != 'true'">
+    <None Update="Lab\testkit.json" CopyToOutputDirectory="PreserveNewest" Link="testkit.json" />
+  </ItemGroup>
+
+  <!--
+    Opt-in deploy into the SPT install at SptDir (game closed):
+      dotnet build -c Release -p:Deploy=true
+  -->
+  <Target Name="DeployToSpt" AfterTargets="Build" Condition="'$(Deploy)' == 'true'">
+    <Error Condition="!Exists('$(BepInExDir)\plugins')" Text="BepInEx plugins folder not found under SptDir=$(SptDir)" />
+    <MakeDir Directories="$(DeployDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(DeployDir)" />
+    <Copy Condition="'$(Public)' != 'true'" SourceFiles="$(MSBuildProjectDirectory)\Lab\testkit.json" DestinationFolder="$(DeployDir)" />
+    <Message Importance="high" Text="RealTargets deployed -> $(DeployDir)" />
+  </Target>
+
+  <!--
+    Release zip (Forge rules: install-ready from the SPT root, LICENSE inside):
+      dist/stompa-RealTargets-<Version>.zip
+        BepInEx/plugins/RealTargets/RealTargets.dll, LICENSE, README.md
+  -->
+  <Target Name="PackageRelease" AfterTargets="Build" Condition="'$(Package)' == 'true'">
+    <Error Condition="'$(Public)' != 'true'" Text="Package=true needs the public build: dotnet build -c Public -p:Package=true" />
+    <PropertyGroup>
+      <RepoRoot>$(MSBuildProjectDirectory)\..\..</RepoRoot>
+      <PackageStage>$(IntermediateOutputPath)package</PackageStage>
+      <PackagePluginDir>$(PackageStage)\BepInEx\plugins\RealTargets</PackagePluginDir>
+      <DistDir>$(RepoRoot)\dist</DistDir>
+      <PackageZip>$(DistDir)\stompa-RealTargets-$(Version).zip</PackageZip>
+      <!-- Working repo: release/README.md; public GitHub tree: README.md at the root. -->
+      <RtReadme Condition="Exists('$(RepoRoot)\release\README.md')">$(RepoRoot)\release\README.md</RtReadme>
+      <RtReadme Condition="'$(RtReadme)' == ''">$(RepoRoot)\README.md</RtReadme>
+    </PropertyGroup>
+    <RemoveDir Directories="$(PackageStage)" />
+    <MakeDir Directories="$(PackagePluginDir);$(DistDir)" />
+    <Copy SourceFiles="$(TargetPath);$(RepoRoot)\LICENSE;$(RtReadme)" DestinationFolder="$(PackagePluginDir)" />
+    <Delete Files="$(PackageZip)" />
+    <ZipDirectory SourceDirectory="$(PackageStage)" DestinationFile="$(PackageZip)" />
+    <Message Importance="high" Text="RealTargets package -> $(PackageZip)" />
+  </Target>
+
+</Project>

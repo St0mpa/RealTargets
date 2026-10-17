@@ -1,0 +1,107 @@
+{
+  "_comment": "Test kit mailed to Stompa before every test (Messenger > Commando, via SPT's 'spt give'). Stompa loses the kit in each test raid, so every new kitId mails the whole kit; F4 in the menus resends it. Ghost/lab tests: lean (only what the test needs, presets with their magazine + one magazine of ammo). Normal raids without ghost (Stompa, 2026-10-16): a full META-style kit with plenty of magazines and ammo + the meds a raid needs. 'spt give' sends a template with a default preset as the whole preset (weapons with their magazine, armour with its plates); magazines and meds come one per count, ammo split into stacks. Template ids verified in the SPT 4.1.6 database (2026-10-16).",
+  "kitId": "1.0.0-shotgun-raid",
+  "note": "Final raid before release (1.0.0 public build, shotgun, ghost off): Saiga-12K full-auto + 5 drums (20 rounds each) + 60 8.5 mm Magnum buckshot, 30 flechette, 20 AP-20 slugs; 6B43 Zabralo-Sh class 6, 6B47 + WMX200, ComTac II, 3 M67, raid meds, rig, backpack. The public build has no mailer: type the spt give lines in Commando.",
+  "items": [
+    {
+      "name": "Mystery Ranch Blackjack 50 backpack",
+      "tpl": "5c0e774286f77468413cc5b2",
+      "count": 1
+    },
+    {
+      "name": "ANA Tactical Alpha chest rig (worn with the body armour)",
+      "tpl": "592c2d1a86f7746dbe2af32a",
+      "count": 1
+    },
+    {
+      "name": "6B43 Zabralo-Sh body armor (preset: soft inserts + Granit Br5 class 6 front/back + side plates)",
+      "tpl": "545cdb794bdc2d3a198b456a",
+      "count": 1
+    },
+    {
+      "name": "6B47 Ratnik-BSh helmet (Olive Drab)",
+      "tpl": "5a7c4850e899ef00150be885",
+      "count": 1
+    },
+    {
+      "name": "Insight WMX200 tactical flashlight (attach to the helmet's equipment slot)",
+      "tpl": "626becf9582c3e319310b837",
+      "count": 1
+    },
+    {
+      "name": "Peltor ComTac II headset",
+      "tpl": "5645bcc04bdc2d363b8b4572",
+      "count": 1
+    },
+    {
+      "name": "Saiga-12K 12ga automatic shotgun (preset \"Saiga-12 FA\" includes one MD Arms 20-round drum)",
+      "tpl": "674fe9a75e51f1c47c04ec23",
+      "count": 1
+    },
+    {
+      "name": "SOK-12 12ga MD Arms 20-round drum magazine (4 spares, empty: load them)",
+      "tpl": "674fe8f6f34d761ab8020cc8",
+      "count": 4
+    },
+    {
+      "name": "12/70 8.5mm Magnum buckshot (8 pellets: the head rule wants >= 5 in the head within 5 m)",
+      "tpl": "5d6e6806a4b936088465b17e",
+      "count": 60
+    },
+    {
+      "name": "12/70 flechette (8 pellets, pen 31: through armour, many holes)",
+      "tpl": "5d6e6911a4b9361bd5780d52",
+      "count": 30
+    },
+    {
+      "name": "12/70 AP-20 armor-piercing slug (28 g, ~3700 J: slug head rule)",
+      "tpl": "5d6e68a8a4b9360b6c0d54e2",
+      "count": 20
+    },
+    {
+      "name": "M67 hand grenade",
+      "tpl": "58d3db5386f77426186285a0",
+      "count": 3
+    },
+    {
+      "name": "Grizzly medical kit",
+      "tpl": "590c657e86f77412b013051d",
+      "count": 1
+    },
+    {
+      "name": "AFAK tactical individual first aid kit",
+      "tpl": "60098ad7c2240c0fe85c570a",
+      "count": 2
+    },
+    {
+      "name": "CALOK-B hemostatic applicator",
+      "tpl": "5e8488fa988a8701445df1e4",
+      "count": 2
+    },
+    {
+      "name": "CAT hemostatic tourniquet",
+      "tpl": "60098af40accd37ef2175f27",
+      "count": 2
+    },
+    {
+      "name": "Surv12 field surgical kit",
+      "tpl": "5d02797c86f774203f38e30a",
+      "count": 1
+    },
+    {
+      "name": "Aluminum splint",
+      "tpl": "5af0454c86f7746bf20992e8",
+      "count": 2
+    },
+    {
+      "name": "Ibuprofen painkillers",
+      "tpl": "5af0548586f7743a532b7e99",
+      "count": 1
+    },
+    {
+      "name": "Propital regenerative stimulant injector",
+      "tpl": "5c0e530286f7747fa1419862",
+      "count": 1
+    }
+  ]
+}
