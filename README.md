@@ -6,6 +6,8 @@ behind the target.
 
 Purely visual: damage, bleeding HP loss, death and AI stay vanilla EFT (and SAIN, if installed).
 
+**Download:** [The Forge](https://sp-mod.com/mod/3165/realtargets) or [GitHub Releases](https://github.com/St0mpa/RealTargets/releases).
+
 ## Features
 - **Entry and exit wounds** on clothing and skin, placed where each round actually went through. Exits are
   bigger and ragged, scaled by the bullet's energy.
@@ -25,7 +27,7 @@ Purely visual: damage, bleeding HP loss, death and AI stay vanilla EFT (and SAIN
 - Lit by the map's own lighting: dark in dark rooms, wet sheen in the light.
 
 ## Install
-1. Install SPT 4.1.x.
+1. Install SPT 4.1.6.
 2. Extract the zip into your SPT folder (the one with `EscapeFromTarkov.exe`). You should end up with
    `BepInEx/plugins/RealTargets/RealTargets.dll`.
 3. Start the game. The config file `BepInEx/config/com.stompa.realtargets.cfg` is created on the first run.
@@ -46,7 +48,7 @@ switched off on its own, and the thresholds can be tuned:
 - **Debug**: log hits, blood and wound placement to the BepInEx log (all off by default; turn on for a bug report).
 
 ## Compatibility
-- **SPT 4.1.x** (tested on 4.1.6). Client-only: no server mod.
+- **SPT 4.1.6** (tested; later 4.1.x patches should work). Client-only: no server mod.
 - **Dependencies**: none beyond SPT.
 - Works alongside **Ragdoll Kinetics** and **SAIN**.
 - **Fika is not supported.**
@@ -70,4 +72,5 @@ The first builds `bin/Public/RealTargets.dll`. The second also writes the instal
 MIT, see `LICENSE`. Copyright (c) 2026 Stompa.
 
 ## Support
-Bug reports: the mod's page on The Forge. Include your `BepInEx/LogOutput.log` with the Debug logs turned on.
+Bug reports: the comments on the [Forge page](https://sp-mod.com/mod/3165/realtargets). Include your
+`BepInEx/LogOutput.log` with the Debug logs turned on.
