@@ -1,9 +1,12 @@
 using System.IO;
+using System.Reflection;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
 using Comfort.Common;
 using EFT;
+using RealTargets.Autopsy;
+using RealTargets.Compat;
 using RealTargets.Diagnostics;
 using RealTargets.Features;
 using RealTargets.Gore;
@@ -54,6 +57,7 @@ namespace RealTargets
         internal static ConfigEntry<bool> VisualsSpurts;
         internal static ConfigEntry<bool> VisualsPools;
         internal static ConfigEntry<bool> VisualsFootprints;
+        internal static ConfigEntry<bool> VisualsDragSmears;
         internal static ConfigEntry<bool> VisualsWounds;
         internal static ConfigEntry<bool> VisualsBodyStains;
         internal static ConfigEntry<bool> VisualsExitSpray;
@@ -62,6 +66,11 @@ namespace RealTargets
         internal static ConfigEntry<bool> VisualsMouth;
         internal static ConfigEntry<float> VisualsDistance;
         internal static ConfigEntry<DecalShaderMode> DecalShader;
+
+        // [Death screen]
+        internal static ConfigEntry<bool> DeathScreenWounds;
+        internal static ConfigEntry<DeathReportMode> DeathScreenReport;
+        internal static ConfigEntry<KeyboardShortcut> DeathScreenAutopsyKey;
 
         // [Gore]
         internal static ConfigEntry<bool> GoreEnabled;
@@ -82,6 +91,9 @@ namespace RealTargets
         internal static ConfigEntry<bool> PushCorpses;
         internal static ConfigEntry<bool> BlastEnabled;
 
+        // [HollywoodFX]
+        internal static ConfigEntry<HfxBloodMode> HfxPreferBlood;
+
         // [Hit model]
         internal static ConfigEntry<float> VolleyWindow;
         internal static ConfigEntry<float> ReferenceEnergy;
@@ -97,6 +109,14 @@ namespace RealTargets
         internal static ConfigEntry<float> FlinchMin;
         internal static ConfigEntry<float> FlinchMax;
         internal static ConfigEntry<float> FlinchHoldSeconds;
+
+        // [Autopsy]
+        internal static ConfigEntry<bool> AutopsyEnabled;
+        internal static ConfigEntry<bool> AutopsyOnlyMine;
+        internal static ConfigEntry<bool> AutopsySkeleton;
+        internal static ConfigEntry<bool> AutopsyOrgans;
+        internal static ConfigEntry<bool> AutopsyCavities;
+        internal static ConfigEntry<bool> AutopsyDragCamera;
 
         // [Debug]
         internal static ConfigEntry<bool> LogWounds;
@@ -142,11 +162,18 @@ namespace RealTargets
             // Order matters: features set results on a volley before the overlay formats it.
             Flinch.Enable();
             HitLogger.Enable();
+            AutopsyRecords.Enable();
+            AutopsyView.Enable();
+            DeathScreen.Enable();
+            DeathReport.Enable();
+            gameObject.AddComponent<DeathScreen>();
+            gameObject.AddComponent<DeathReport>();
             gameObject.AddComponent<BleedSystem>();
             gameObject.AddComponent<BloodParticles>();
             gameObject.AddComponent<BloodMist>();
             gameObject.AddComponent<GroundBlood>();
             gameObject.AddComponent<Footprints>();
+            gameObject.AddComponent<DragSmears>();
             gameObject.AddComponent<ImpactBlood>();
             gameObject.AddComponent<BleedVisuals>();
             gameObject.AddComponent<WoundDecals>();
@@ -170,6 +197,7 @@ namespace RealTargets
             if (Singleton<GameWorld>.Instantiated)
             {
                 _raidReset = false;
+                if (!_bodyWarm && Singleton<GameWorld>.Instance.MainPlayer != null) WarmBody(Singleton<GameWorld>.Instance.MainPlayer);
                 HitCollector.Flush();
                 return;
             }
@@ -178,6 +206,7 @@ namespace RealTargets
             {
                 _raidReset = true;
                 HitCollector.Reset();
+                AutopsyRecords.ResetRaid();
                 GetComponent<BleedSystem>()?.ResetRaid();
                 GetComponent<BleedVisuals>()?.ResetRaid();
                 GetComponent<WoundDecals>()?.ResetRaid();
@@ -186,6 +215,7 @@ namespace RealTargets
                 GetComponent<BloodMist>()?.ResetRaid();
                 GetComponent<GroundBlood>()?.ResetRaid();
                 GetComponent<Footprints>()?.ResetRaid();
+                GetComponent<DragSmears>()?.ResetRaid();
                 GetComponent<Impacts>()?.ResetRaid();
 #if !PUBLIC
                 GetComponent<TestLab>()?.ResetRaid();
@@ -201,6 +231,7 @@ namespace RealTargets
         /// </summary>
         private void WarmUp()
         {
+            DeathScreen.RaidStarted();
             var watch = System.Diagnostics.Stopwatch.StartNew();
             try
             {
@@ -215,7 +246,137 @@ namespace RealTargets
             {
                 Log.LogWarning($"Warm-up: {ex.Message}");
             }
-            Log.LogInfo($"Warm-up at raid load: {watch.Elapsed.TotalMilliseconds:F0} ms");
+            double assets = watch.Elapsed.TotalMilliseconds;
+            try
+            {
+                WarmEngine();
+            }
+            catch (System.Exception ex)
+            {
+                Log.LogWarning($"Warm-up (engine paths): {ex.Message}");
+            }
+            assets = watch.Elapsed.TotalMilliseconds;
+            int compiled = CompileAhead();
+            Log.LogInfo($"Warm-up at raid load: {watch.Elapsed.TotalMilliseconds:F0} ms (assets {assets:F0} ms, {compiled} methods compiled ahead)");
+        }
+
+        private static bool _bodyWarm;
+
+        /// <summary>Once per game: your body baked and cooked at spawn so the first hit on a bot doesn't pay for it.</summary>
+        private void WarmBody(Player player)
+        {
+            _bodyWarm = true;
+            try
+            {
+                double ms = GetComponent<WoundDecals>()?.WarmBody(player) ?? 0;
+                Log.LogInfo($"Warm-up on your body at spawn: {ms:F0} ms (skins baked, cooked and ray-cast once)");
+            }
+            catch (System.Exception ex)
+            {
+                Log.LogWarning($"Warm-up on your body: {ex.Message}");
+            }
+        }
+
+        private static bool _engineWarm;
+
+        /// <summary>
+        /// Runs once the engine paths every first hit and first cut use: a skinned mesh baked, a mesh collider cooked
+        /// and ray-cast (the wound decals' surface finder), a convex collider on a rigidbody (gore pieces), a skinned
+        /// renderer with bones (wound batches, cut skins). Gore retest 4: with our code compiled ahead the raid's first hit
+        /// still cost WoundDecals 17 ms + AutopsyRecords 9 ms and the first cut 38 ms (later ones 10-23 ms).
+        /// Far below the map, one frame, destroyed at once.
+        /// </summary>
+        private static void WarmEngine()
+        {
+            if (_engineWarm) return;
+            _engineWarm = true;
+            var root = new GameObject("RealTargetsWarmUp");
+            root.transform.position = new Vector3(0f, -5000f, 0f);
+            var meshes = new System.Collections.Generic.List<Mesh>();
+            try
+            {
+                // A small closed box mesh (12 triangles).
+                var box = new Mesh { name = "RealTargetsWarmBox" };
+                meshes.Add(box);
+                box.vertices = new[]
+                {
+                    new Vector3(-0.1f, -0.1f, -0.1f), new Vector3(0.1f, -0.1f, -0.1f), new Vector3(0.1f, 0.1f, -0.1f), new Vector3(-0.1f, 0.1f, -0.1f),
+                    new Vector3(-0.1f, -0.1f, 0.1f), new Vector3(0.1f, -0.1f, 0.1f), new Vector3(0.1f, 0.1f, 0.1f), new Vector3(-0.1f, 0.1f, 0.1f),
+                };
+                box.triangles = new[] { 0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 6, 2, 3, 7, 6, 0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5 };
+                var weights = new BoneWeight[8];
+                for (int i = 0; i < 8; i++) weights[i] = new BoneWeight { boneIndex0 = 0, weight0 = 1f };
+                box.boneWeights = weights;
+                box.bindposes = new[] { Matrix4x4.identity };
+                box.RecalculateNormals();
+                box.RecalculateBounds();
+
+                // Skinned renderer + bake (wound bakes, skin cuts, autopsy model).
+                var skinGo = new GameObject("skin");
+                skinGo.transform.SetParent(root.transform, false);
+                var smr = skinGo.AddComponent<SkinnedMeshRenderer>();
+                smr.bones = new[] { skinGo.transform };
+                smr.rootBone = skinGo.transform;
+                smr.sharedMesh = box;
+                var baked = new Mesh { name = "RealTargetsWarmBaked" };
+                meshes.Add(baked);
+                smr.BakeMesh(baked, true);
+
+                // Mesh collider cooked and hit (WoundDecals.Surface), then a convex one on a rigidbody (gore pieces).
+                var colGo = new GameObject("collider");
+                colGo.transform.SetParent(root.transform, false);
+                var mc = colGo.AddComponent<MeshCollider>();
+                mc.sharedMesh = baked;
+                Physics.SyncTransforms();
+                mc.Raycast(new Ray(root.transform.position + Vector3.up, Vector3.down), out _, 2f);
+                var pieceGo = new GameObject("piece");
+                pieceGo.transform.SetParent(root.transform, false);
+                pieceGo.transform.localPosition = new Vector3(1f, 0f, 0f);
+                var convex = pieceGo.AddComponent<MeshCollider>();
+                convex.convex = true;
+                convex.sharedMesh = box;
+                var body = pieceGo.AddComponent<Rigidbody>();
+                body.isKinematic = true;
+            }
+            finally
+            {
+                Destroy(root);
+                foreach (var m in meshes) Destroy(m);
+            }
+        }
+
+        private static bool _compiled;
+
+        /// <summary>
+        /// JIT-compiles the gore, wound, hit, autopsy and feature code once, on the first raid's loading screen (gore-2/gore-3 tests: the
+        /// raid's first limb cut took 29-31 ms, later ones 6-12 ms; the first wound patch 17 ms; gore-4: first cut 22 ms, first hit
+        /// still 40 ms with AutopsyRecords.OnHit 8 ms uncompiled, so Autopsy and Features joined).
+        /// </summary>
+        private static int CompileAhead()
+        {
+            if (_compiled) return 0;
+            _compiled = true;
+            int count = 0;
+            const BindingFlags all = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+            foreach (var type in typeof(Plugin).Assembly.GetTypes())
+            {
+                string ns = type.Namespace ?? "";
+                if (type.ContainsGenericParameters || !(ns.StartsWith("RealTargets.Gore") || ns.StartsWith("RealTargets.Hits") || ns.StartsWith("RealTargets.Autopsy") || ns.StartsWith("RealTargets.Features"))) continue;
+                foreach (var method in type.GetMethods(all))
+                {
+                    if (method.IsAbstract || method.ContainsGenericParameters) continue;
+                    try
+                    {
+                        System.Runtime.CompilerServices.RuntimeHelpers.PrepareMethod(method.MethodHandle);
+                        count++;
+                    }
+                    catch (System.Exception)
+                    {
+                        // Not compilable ahead (extern, generic context): it compiles on first use as before.
+                    }
+                }
+            }
+            return count;
         }
 
         private void BindConfig()
@@ -261,6 +422,9 @@ namespace RealTargets
             VisualsSpatter = Config.Bind(visuals, "Wall spatter", true,
                 "A splash on the wall or floor behind a through-shot (within ~2.5 m), placed at once.");
             VisualsMouth = Config.Bind(visuals, "Mouth blood", true, "Chest wounds: coughing blood while standing, dribbling from the mouth when lying or dead.");
+            VisualsDragSmears = Config.Bind(visuals, "Drag smears", true,
+                "A bleeding corpse moved along the floor (dragged with TraumaCore or another mod, shoved by a blast) smears its blood " +
+                "behind the wound that touches the floor, fainter the further it goes.");
             VisualsFootprints = Config.Bind(visuals, "Bloody footprints", true,
                 "Anyone who walks through a wet pool (you or a bot) leaves boot prints after it, fainter with every step.");
             VisualsPools = Config.Bind(visuals, "Pools", true,
@@ -305,6 +469,18 @@ namespace RealTargets
             HeadCumulativeHits = Config.Bind(gore, "Cumulative head hits", 3,
                 new ConfigDescription("Least number of rounds in the head before it can come apart from repeated hits.", new AcceptableValueRange<int>(1, 30)));
 
+            DeathScreenWounds = Config.Bind("Death screen", "Wounds on your PMC", true,
+                "After a death, your PMC on the raid results screen shows what hit you: entry and exit wounds, blood on the clothes, " +
+                "a destroyed head or lost limbs (the same rules as on bots).");
+            DeathScreenReport = Config.Bind("Death screen", "Report", DeathReportMode.RealTargets,
+                "Whose report shows over your PMC on the raid results after a death; switches live. RealTargets: our AUTOPSY " +
+                "switch (TraumaCore's hit markers and labels are hidden). TraumaCore: only TraumaCore's report, no AUTOPSY switch. " +
+                "Both: TraumaCore's markers on the model and our AUTOPSY switch. Without TraumaCore installed, RealTargets and Both are the same.");
+            DeathScreenAutopsyKey = Config.Bind("Death screen", "Autopsy key", new KeyboardShortcut(KeyCode.X),
+                "On the raid results after a death: switches the model spot between your wounded PMC and the AUTOPSY of your own " +
+                "death (X-ray in the death pose, every shot that hit you and who fired it, cause of death, health at death). " +
+                "The AUTOPSY button next to the model does the same.");
+
             const string impacts = "Impacts";
             ImpactsEnabled = Config.Bind(impacts, "Enabled", true, "Bullets push dead bodies (momentum at the hit bone).");
             PushStrength = Config.Bind(impacts, "Push strength", 2f,
@@ -314,6 +490,13 @@ namespace RealTargets
                 "Shots move corpses (frozen corpses are woken for a few seconds, then settle again).");
             BlastEnabled = Config.Bind(impacts, "Blast injuries", true,
                 "Grenade blasts throw corpses within 6 m away from the charge (by overpressure). Damage to the living is EFT's.");
+
+            HfxPreferBlood = Config.Bind("HollywoodFX", "Prefer its blood", HfxBloodMode.Off,
+                "Only when HollywoodFX is installed; switches live. Off: both mods' blood. Overlaps: ours skips what HollywoodFX " +
+                "already draws at the hit: the mist at the entry (backspatter) while its gore effects are on, and the splash on " +
+                "the wall behind while its blood splatter is on. All: also our exit spray, exit mist and the squeeze of blood " +
+                "from a shot corpse, so only HollywoodFX's blood shows at the moment of the hit (it has none at the exit side). " +
+                "Always ours: wounds, bleeding, stains, pools, footprints, mouth blood and gore.");
 
             const string model = "Hit model";
             VolleyWindow = Config.Bind(model, "Volley window", 0.05f,
@@ -351,6 +534,22 @@ namespace RealTargets
             FlinchHoldSeconds = Config.Bind(flinch, "Full IK hold (s)", 1f,
                 new ConfigDescription("How long the bot's full-body IK stays in full-quality mode after a hit (EFT uses 0.6).",
                     new AcceptableValueRange<float>(0.3f, 3f)));
+
+            const string autopsy = "Autopsy";
+            AutopsyEnabled = Config.Bind(autopsy, "Enabled", true,
+                "AUTOPSY tab next to LOOT when you loot a body: every shot that hit it (shooter, weapon, ammo, distance, " +
+                "armour, damage, path through the body), the killing shot, health at death and a front/back body chart.");
+            AutopsyOnlyMine = Config.Bind(autopsy, "Only my shots", false,
+                "List and draw only your own shots (bot-vs-bot hits on the same body are hidden).");
+            AutopsySkeleton = Config.Bind(autopsy, "3D skeleton", true,
+                "Simplified skeleton inside the 3D body (orange = fractured at death).");
+            AutopsyOrgans = Config.Bind(autopsy, "3D organ zones", true,
+                "Approximate organ zones inside the 3D body; the ones a shot went through light up.");
+            AutopsyCavities = Config.Bind(autopsy, "3D energy cavities", true,
+                "Glowing spindle along each wound channel: the temporary cavity, wider where the round dumped more energy.");
+            AutopsyDragCamera = Config.Bind(autopsy, "3D drag turns the camera", false,
+                "Off: dragging turns the body with the mouse (left button) and right-drag slides it up/down with the mouse. " +
+                "On: both move the camera instead (the opposite directions).");
 
             const string debug = "Debug";
             LogWounds = Config.Bind(debug, "Log wound placement", Dev,

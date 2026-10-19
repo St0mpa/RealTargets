@@ -65,16 +65,34 @@ namespace RealTargets.Gore
         internal static Dismemberment Instance { get; private set; }
         internal int PieceCount => _pieces.Count;
 
+        /// <summary>A head or limb came apart: (body, what happened, why). The autopsy lists these.</summary>
+        internal static event System.Action<Player, string, string> GoreDone;
+
+        private static void RaiseGore(Player player, string what, string why)
+        {
+            try
+            {
+                GoreDone?.Invoke(player, what, why);
+            }
+            catch (System.Exception ex)
+            {
+                Plugin.Log.LogWarning($"[Gore] listener failed: {ex.Message}");
+            }
+        }
+
         private readonly Dictionary<int, Body> _bodies = new Dictionary<int, Body>();
         private readonly Queue<GameObject> _pieces = new Queue<GameObject>();
         private readonly List<int> _release = new List<int>();
 
+        // Upper parts first (gore-3 test: one 40 mm took a forearm, then the upper arm of the same arm; the second cut ran on
+        // skin already cut and re-bound, and the shoulder's cap had holes). A blast that reaches both now takes the whole
+        // limb at the upper cut, as one piece; the lower part then reads "already gone with a higher cut".
         private static readonly EBodyPartColliderType[] Limbs =
         {
-            EBodyPartColliderType.LeftForearm, EBodyPartColliderType.RightForearm,
-            EBodyPartColliderType.LeftCalf, EBodyPartColliderType.RightCalf,
             EBodyPartColliderType.LeftUpperArm, EBodyPartColliderType.RightUpperArm,
             EBodyPartColliderType.LeftThigh, EBodyPartColliderType.RightThigh,
+            EBodyPartColliderType.LeftForearm, EBodyPartColliderType.RightForearm,
+            EBodyPartColliderType.LeftCalf, EBodyPartColliderType.RightCalf,
         };
 
         private void Awake()
@@ -91,6 +109,7 @@ namespace RealTargets.Gore
 
         internal void ResetRaid()
         {
+            _limbHits.Clear();
             foreach (var body in _bodies.Values) Restore(body);
             _bodies.Clear();
             while (_pieces.Count > 0)
@@ -105,8 +124,13 @@ namespace RealTargets.Gore
         private void OnVolley(HitVolley volley)
         {
             var target = volley.Target;
-            if (!Plugin.GoreEnabled.Value || target == null || !volley.First.IsAI || volley.First.IsLocalPlayer || volley.Status == HitStatus.Alive)
+            if (!Plugin.GoreEnabled.Value || target == null || !volley.First.IsAI || volley.First.IsLocalPlayer)
             {
+                return;
+            }
+            if (volley.Status == HitStatus.Alive)
+            {
+                RememberLimbHits(volley);
                 return;
             }
 
@@ -191,7 +215,7 @@ namespace RealTargets.Gore
             {
                 // Below the destruction rules a full-power rifle (or .50 AE) bullet still bursts the skull
                 // open at the exit (0.10.5, Stompa): the head stays on.
-                if (burst != null) BurstSkull(volley.Target, burstPath, $"{burst.AmmoName} {burstPath.Energy:F0} J", corpse);
+                if (burst != null) BurstSkull(volley.Target, burst, burstPath, $"{burst.AmmoName} {burstPath.Energy:F0} J", corpse);
                 return;
             }
 
@@ -202,8 +226,49 @@ namespace RealTargets.Gore
         /// Handgun calibres of 12 mm or more (.50 AE; 0.10.5): no limb loss and not the slug/12.7 mm head
         /// rule. The 0.10.4 test: a Desert Eagle Hawk JSP (2850 J) took heads, a calf and a thigh as "12.7 mm".
         /// </summary>
-        private static bool PistolCalibre(string caliber) =>
+        internal static bool PistolCalibre(string caliber) =>
             !string.IsNullOrEmpty(caliber) && (caliber.StartsWith("127x33") || caliber.StartsWith("1143x23") || caliber.StartsWith("9x33"));
+
+        // gore-5 (gore-4 test: seven PS12B into a T0's upper arm, every hit read "alive", the bot died 0.23 s after the last
+        // one, the arm stayed on): EFT can kill a frame or more after the hit (a destroyed limb's damage spreads to the
+        // rest of the body). A heavy-calibre limb hit on a living bot is held for LateDeathWindow; if the bot dies inside
+        // it, that hit counts as the killing shot.
+        private const float LateDeathWindow = 0.5f;
+        private readonly List<(Player target, EBodyPartColliderType collider, Vector3 velocity, string why, float time)> _limbHits =
+            new List<(Player, EBodyPartColliderType, Vector3, string, float)>();
+
+        private void RememberLimbHits(HitVolley volley)
+        {
+            foreach (var p in volley.Projectiles)
+            {
+                if (!WoundPath.Resolve(p, out var path) || !Limbs.Contains(path.Entry.Collider)) continue;
+                if (!HeavyCalibre(p.Caliber) || path.Energy < Plugin.LimbEnergy.Value) continue;
+                _limbHits.Add((volley.Target, path.Entry.Collider, path.Direction * Mathf.Lerp(3f, 8f, Mathf.Clamp01(path.Energy / 8000f)),
+                    $"{p.AmmoName} {path.Energy:F0} J", Time.time));
+            }
+        }
+
+        /// <summary>Held limb hits whose bot died within the window: severed as the killing shot; the rest expire.</summary>
+        private void LateDeaths()
+        {
+            float now = Time.time;
+            for (int i = _limbHits.Count - 1; i >= 0; i--)
+            {
+                var (target, collider, velocity, why, time) = _limbHits[i];
+                bool dead = target != null && target.HealthController != null && !target.HealthController.IsAlive;
+                if (!dead && now - time <= LateDeathWindow) continue;
+                _limbHits.RemoveAt(i);
+                if (!dead || !Plugin.GoreEnabled.Value) continue;
+                try
+                {
+                    Sever(target, collider, velocity, $"{why}, died {now - time:F2} s after it", corpse: false);
+                }
+                catch (System.Exception ex)
+                {
+                    Plugin.Log.LogError($"Dismemberment (late death): {ex}");
+                }
+            }
+        }
 
         private void TryLimbs(HitVolley volley, bool corpse)
         {
@@ -217,7 +282,7 @@ namespace RealTargets.Gore
         }
 
         /// <summary>12.7 mm rifle/MG and up (12.7x55, 12.7x99, 12.7x108, 30 mm, 40 mm); shotguns and the .50 AE pistol don't count for limbs.</summary>
-        private static bool HeavyCalibre(string caliber) =>
+        internal static bool HeavyCalibre(string caliber) =>
             !string.IsNullOrEmpty(caliber) && !PistolCalibre(caliber) &&
             (caliber.StartsWith("127") || caliber.StartsWith("30x") || caliber.StartsWith("40x"));
 
@@ -284,8 +349,11 @@ namespace RealTargets.Gore
                         bool blocked = d < range && Blocked(at, p);
                         parts.Add($"{type} {d:F2}/{range:F2}{(blocked ? " blocked" : "")}");
                         if (severed >= 2 || d >= range || blocked) continue;
-                        // Against the limb: near certain; otherwise falling off with distance.
-                        float chance = d < 0.12f * scale ? 0.95f : 0.8f * (1f - d / range) + 0.2f;
+                        // Against the limb (within 0.2 m x reach): near certain; otherwise 90 % falling to 45 % at the edge
+                        // of reach (1.1.0 retest 4: two RGD-5s at the feet, calves at 0.12 and 0.28 m, took nothing on
+                        // 81 % and 55 % rolls; 0.10.6 began falling off from 0.12 m to 20 %).
+                        float near = 0.2f * scale;
+                        float chance = d < near ? 0.95f : Mathf.Lerp(0.9f, 0.45f, (d - near) / Mathf.Max(range - near, 0.01f));
                         if (Random.value >= chance) continue;
                         if (Sever(player, type, Away(at, bpc.Collider.bounds.center) * Mathf.Lerp(8f, 3f, d / range), $"{name} at {d:F2} m", corpse: true))
                         {
@@ -351,30 +419,50 @@ namespace RealTargets.Gore
             var up = head.position - neck.position;
             up = up.sqrMagnitude > 1e-4f ? up.normalized : Vector3.up;
             dir = dir.sqrMagnitude > 1e-4f ? dir.normalized : -up;
-            var stumpAt = head.position;
             int layer = BodyLayer(player);
+            var front = BodyFront(player, up, dir);
 
             if (!body.HelmetThrown) ThrowHeadwear(player, dir, energy);
             body.HelmetThrown = true;
+
+            // 1.1.0 gore pass: the skins are cut where their weights pass from the neck to the head (before the collapse, which
+            // would pull the rim into the head's pivot), and the cap is built on that edge. Before, a 6 cm dome sat at the
+            // head bone's pivot, the top of the neck: above a cut hidden inside a high collar it hovered (Zabralo).
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            var plans = SkinCut.Plan(player, new List<Transform> { head }, RaggedThreshold(head.position, up));
+            var cap = ApplyCuts(body, plans, head.position, up, front, GoreMeshes.StumpKind.Neck, layer, neck,
+                out var stumpAt, out float stumpRadius, out string cutNote);
             Collapse(body, head);
+            if (cap != null)
+            {
+                body.Attached.Add(cap);
+            }
+            else
+            {
+                // No readable skin edge (or no keep bone): the old cap at the pivot over the collapsed skin.
+                stumpAt = head.position;
+                stumpRadius = 0.055f;
+                var stump = GoreMeshes.Stump(neck, stumpAt, up, stumpRadius, layer);
+                if (stump != null) body.Attached.Add(stump);
+            }
+            double cutMs = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            // Our wound patches on the head would collapse with it and stretch into its pivot: off with them.
+            WoundDecals.Instance?.ClearNear(player, centre, 0.12f);
+            StartCoroutine(ClearLater(player, centre, 0.12f));
 
-            var stump = GoreMeshes.Stump(neck, stumpAt, up, 0.06f, layer);
-            if (stump != null) body.Attached.Add(stump);
-
-            // Carotids spurt (while the heart or its last beats pump), the jugular pours; the rest of
-            // the head's blood and what the neck vessels hold run out over the next minutes.
-            var side = Vector3.Cross(up, dir);
-            side = side.sqrMagnitude > 1e-4f ? side.normalized : Vector3.Cross(up, Vector3.forward).normalized;
-            var front = Vector3.Cross(side, up).normalized;
+            // Carotids spurt (while the heart or its last beats pump), the jugulars pour; the rest of the head's blood and
+            // what the neck vessels hold run out over the next minutes. Where the cut's texture draws them.
+            var side = Vector3.Cross(up, front).normalized;
             var bleed = BleedSystem.Instance;
             if (bleed != null)
             {
+                float r = stumpRadius;
                 bleed.AddStump(player, corpse, neck, EBodyPart.Head, EBodyPartColliderType.NeckFront,
-                    stumpAt + side * 0.02f + front * 0.015f, up + side * 0.25f, 1300f, true, 0f, "neck (left carotid)");
+                    stumpAt + side * (0.42f * r) + front * (0.24f * r), up + side * 0.25f, 1300f, true, 0f, "neck (left carotid)");
                 bleed.AddStump(player, corpse, neck, EBodyPart.Head, EBodyPartColliderType.NeckFront,
-                    stumpAt - side * 0.02f + front * 0.015f, up - side * 0.25f, 1300f, true, 0f, "neck (right carotid)");
+                    stumpAt - side * (0.42f * r) + front * (0.24f * r), up - side * 0.25f, 1300f, true, 0f, "neck (right carotid)");
                 bleed.AddStump(player, corpse, neck, EBodyPart.Head, EBodyPartColliderType.NeckBack,
-                    stumpAt, up, 450f, false, 900f, "neck (jugulars, head)");
+                    stumpAt + front * (0.13f * r), up, 450f, false, 900f, "neck (jugulars, head)");
             }
 
             // The head comes apart along the shot: gibs, skull pieces, a large cloud, a big splash.
@@ -382,16 +470,23 @@ namespace RealTargets.Gore
             // ~1950 J gave gibs at 1.3-4.5 m/s and the mist hung ~1 s; a head bursting throws fragments
             // at well over 10 m/s and the cloud is gone within a few tenths of a second.
             if (Plugin.GoreGibs.Value) Gibs(player, centre, dir, Random.Range(16, 26), 0.35f, Mathf.Clamp(energy / 2000f, 1f, 1.8f), 0.3f);
-            var mist = BloodMist.Instance;
-            mist?.Puff(centre, dir, 0.3f, 1f, 28, 3f);
-            mist?.Puff(centre, -dir, 0.14f, 0.7f, 8, 2.5f);
-            mist?.Puff(centre, up, 0.18f, 0.8f, 10, 2.5f);
-            var drops = BloodParticles.Instance;
-            drops?.Emit(centre, dir * 10f, 30f, 70, 0.012f);
-            drops?.Emit(centre, (dir + up).normalized * 6f, 60f, 35, 0.01f);
-            Splash(centre, dir, 3.5f, 50, 0.3f, Random.Range(3, 6));
+            if (Blood)
+            {
+                var mist = BloodMist.Instance;
+                mist?.Puff(centre, dir, 0.3f, 1f, 28, 3f);
+                mist?.Puff(centre, -dir, 0.14f, 0.7f, 8, 2.5f);
+                mist?.Puff(centre, up, 0.18f, 0.8f, 10, 2.5f);
+                var drops = BloodParticles.Instance;
+                drops?.Emit(centre, dir * 10f, 30f, 70, 0.012f);
+                drops?.Emit(centre, (dir + up).normalized * 6f, 60f, 35, 0.01f);
+                // From the neck too: the first gush out of the cut vessels.
+                drops?.Emit(stumpAt, up * 3f, 35f, 25, 0.011f);
+                Splash(centre, dir, 3.5f, 50, 0.3f, Random.Range(3, 6));
+            }
 
-            Plugin.Log.LogInfo($"[Gore] {player.Profile?.Nickname}: head destroyed ({why}){(corpse ? " [corpse]" : " [killing shot]")}");
+            Plugin.Log.LogInfo($"[Gore] {player.Profile?.Nickname}: head destroyed ({why}){(corpse ? " [corpse]" : " [killing shot]")}: " +
+                               $"{cutNote}, cut {Along(Vector3.Dot(stumpAt - head.position, up), "above", "below")} the head pivot ({cutMs:F1} ms)");
+            RaiseGore(player, "Head destroyed", why);
         }
 
         /// <summary>The helmet flies off: a visual clone of its renderers with physics (the real model is EFT's).</summary>
@@ -416,7 +511,7 @@ namespace RealTargets.Gore
                 else if (r is SkinnedMeshRenderer smr && smr.sharedMesh != null)
                 {
                     mesh = new Mesh { name = "RealTargetsHelmetBake" };
-                    smr.BakeMesh(mesh, false);
+                    smr.BakeMesh(mesh, true);
                 }
                 if (mesh == null) continue;
 
@@ -471,13 +566,25 @@ namespace RealTargets.Gore
         /// clot) closes it, skull shards stick out of the rim; gibs, mist and a splash along the shot. A
         /// helmet over the exit flies off. Wound patches over the hole are removed.
         /// </summary>
-        private void BurstSkull(Player player, WoundPath path, string why, bool corpse)
+        private void BurstSkull(Player player, HitEvent hit, WoundPath path, string why, bool corpse)
         {
             var bones = player.PlayerBones;
             var head = bones?.Head?.Original;
             if (head == null) return;
             var body = GetBody(player);
             if (body.HeadGone || body.HeadBurst) return;
+
+            // The shot line where the head is now: it was recorded when the shot landed, the volley comes 50 ms+ later, by
+            // when a killed bot's ragdoll has moved the head (gore-3 test: exits 8-10 cm off the mesh, killing shots only).
+            float headMoved = 0f;
+            if (hit != null && hit.HasHeadPose)
+            {
+                var back = head.rotation * Quaternion.Inverse(hit.HeadRotation);
+                headMoved = Vector3.Distance(hit.HeadPosition, head.position);
+                path.Start = head.position + back * (path.Start - hit.HeadPosition);
+                path.End = head.position + back * (path.End - hit.HeadPosition);
+                path.Direction = back * path.Direction;
+            }
 
             Collider headCollider = null;
             var centre = head.position;
@@ -530,6 +637,40 @@ namespace RealTargets.Gore
                 if (!path.Exited && headCollider != null && headCollider.Raycast(new Ray(path.Start + dir * 0.5f, -dir), out var far, 0.5f))
                 {
                     exit = far.point;
+                }
+
+                // Gore retest (2026-10-18): an M80 killing shot through a T2's eyes (SSh-68) found no triangle on its line and
+                // none around EFT's exit either, so the skull stayed whole. Snap to the nearest head surface within 10 cm.
+                var nearest = Vector3.zero;
+                float nearestSqr = 0.1f * 0.1f;
+                foreach (var skin in skins)
+                {
+                    if (!skin.Lod0) continue;
+                    for (int sub = 0; sub < skin.Mesh.subMeshCount; sub++)
+                    {
+                        var tris = skin.Tris[sub];
+                        for (int t = 0; t + 2 < tris.Length; t += 3)
+                        {
+                            int a = tris[t], b = tris[t + 1], c = tris[t + 2];
+                            if (skin.Share[a] < 0.4f || skin.Share[b] < 0.4f || skin.Share[c] < 0.4f) continue;
+                            var mid = (skin.World[a] + skin.World[b] + skin.World[c]) / 3f;
+                            float sqr = (mid - exit).sqrMagnitude;
+                            if (sqr < nearestSqr)
+                            {
+                                nearestSqr = sqr;
+                                nearest = mid;
+                            }
+                        }
+                    }
+                }
+                if (nearest != Vector3.zero)
+                {
+                    exitFrom += $", snapped {Mathf.Sqrt(nearestSqr) * 100f:F1} cm to the head surface";
+                    exit = nearest;
+                }
+                else
+                {
+                    exitFrom += $", line {Distance(centre, path.Start, dir) * 100f:F1} cm from the head centre";
                 }
             }
 
@@ -595,7 +736,7 @@ namespace RealTargets.Gore
             }
             if (removed == 0)
             {
-                Plugin.Log.LogInfo($"[Gore] {player.Profile?.Nickname}: skull burst ({why}) found no head surface at the exit ({exitFrom})");
+                Plugin.Log.LogInfo($"[Gore] {player.Profile?.Nickname}: skull burst ({why}) found no head surface at the exit ({exitFrom}; head moved {headMoved * 100f:F1} cm since the shot)");
                 return;
             }
             body.HeadBurst = true;
@@ -619,14 +760,18 @@ namespace RealTargets.Gore
             BleedSystem.Instance?.AddStump(player, corpse, head, EBodyPart.Head, EBodyPartColliderType.HeadCommon, exit, n, 350f, false, 500f, "skull burst");
 
             if (Plugin.GoreGibs.Value) Gibs(player, exit, (dir + n).normalized, Random.Range(8, 14), 0.4f, Mathf.Clamp(energy / 2500f, 0.8f, 1.5f), 0.4f);
-            var mist = BloodMist.Instance;
-            mist?.Puff(exit, dir, 0.22f, 0.9f, 18, 2.2f);
-            mist?.Puff(exit, n, 0.12f, 0.6f, 6, 2f);
-            BloodParticles.Instance?.Emit(exit, dir * 8f, 35f, 45, 0.011f);
-            Splash(exit, dir, 3f, 35, 0.25f, Random.Range(2, 5));
+            if (Blood)
+            {
+                var mist = BloodMist.Instance;
+                mist?.Puff(exit, dir, 0.22f, 0.9f, 18, 2.2f);
+                mist?.Puff(exit, n, 0.12f, 0.6f, 6, 2f);
+                BloodParticles.Instance?.Emit(exit, dir * 8f, 35f, 45, 0.011f);
+                Splash(exit, dir, 3f, 35, 0.25f, Random.Range(2, 5));
+            }
 
             Plugin.Log.LogInfo($"[Gore] {player.Profile?.Nickname}: skull burst ({why}){(corpse ? " [corpse]" : " [killing shot]")}: exit from {exitFrom}, " +
-                               $"r {radius * 100f:F1} cm, {removed} triangles out of {cutSkins} skin(s), crater rim {rim} edges");
+                               $"r {radius * 100f:F1} cm, {removed} triangles out of {cutSkins} skin(s), crater rim {rim} edges, head moved {headMoved * 100f:F1} cm since the shot");
+            RaiseGore(player, "Skull burst open", why);
         }
 
         /// <summary>Every skin (all LODs) with vertices skinned to the head bone or below it, baked to world now.</summary>
@@ -670,7 +815,7 @@ namespace RealTargets.Gore
                 if (!anyVertex) continue;
 
                 var baked = new Mesh();
-                smr.BakeMesh(baked, false);
+                smr.BakeMesh(baked, true);
                 var local = baked.vertices;
                 Destroy(baked);
                 var world = new Vector3[local.Length];
@@ -887,13 +1032,36 @@ namespace RealTargets.Gore
                 radius = Mathf.Clamp(limb.Radius * 1.05f, 0.035f, 0.09f);
             }
             int layer = BodyLayer(player);
+            var front = frame != null ? frame.Forward : Vector3.forward;
 
-            int triangles = ExtractPiece(player, $"{player.Profile?.Nickname} {type}", skins, group, proximal, axis, radius, layer, velocity, Mass(type));
+            // 1.1.0 gore pass: one cut for both sides. The same triangles leave the body's skins (all LODs) and make the piece, along
+            // a ragged line around the limb where the weights pass to the removed bones; each side's cap is built on its
+            // own edge (before: the body kept a cone of skin pulled into the joint under a round dome).
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            var plans = SkinCut.Plan(player, group, RaggedThreshold(proximal, axis));
+            int triangles = ExtractPiece(player, $"{player.Profile?.Nickname} {type}", plans, proximal, axis, radius, layer, velocity, Mass(type), front);
             body.Cut.Add(key);
+            var cap = ApplyCuts(body, plans, proximal, axis, front, GoreMeshes.StumpKind.Limb, layer, bone.parent,
+                out var cutAt, out float cutRadius, out string cutNote);
             foreach (var b in group) Collapse(body, b);
-
-            var stump = GoreMeshes.Stump(bone.parent, proximal, axis, radius, layer);
-            if (stump != null) body.Attached.Add(stump);
+            if (cap != null)
+            {
+                body.Attached.Add(cap);
+            }
+            else
+            {
+                // No readable skin to cut (gore-4 test: a PMC T0's bare calf): the part only collapses, so the skin narrows
+                // into a cone that ends at the joint. A full-size cap at the joint stood out of that cone like a loose disc;
+                // a smaller one set back into it closes the tip instead.
+                cutAt = proximal - axis * (radius * 0.35f);
+                var stump = GoreMeshes.Stump(bone.parent, cutAt, axis, radius * 0.65f, layer);
+                if (stump != null) body.Attached.Add(stump);
+            }
+            double cutMs = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            // Our wound patches on the removed part would collapse with its bones and stretch into the joint; those across the cut go (the rest shrink away).
+            var removedMid = cutAt + axis * 0.04f;
+            WoundDecals.Instance?.ClearNear(player, removedMid, 0.08f);
+            StartCoroutine(ClearLater(player, removedMid, 0.08f));
 
             var part = type == EBodyPartColliderType.LeftForearm || type == EBodyPartColliderType.LeftUpperArm ? EBodyPart.LeftArm
                 : type == EBodyPartColliderType.RightForearm || type == EBodyPartColliderType.RightUpperArm ? EBodyPart.RightArm
@@ -901,18 +1069,35 @@ namespace RealTargets.Gore
             float flow = type == EBodyPartColliderType.LeftThigh || type == EBodyPartColliderType.RightThigh ? 1400f
                 : type == EBodyPartColliderType.LeftUpperArm || type == EBodyPartColliderType.RightUpperArm ? 900f
                 : type == EBodyPartColliderType.LeftCalf || type == EBodyPartColliderType.RightCalf ? 500f : 300f;
-            BleedSystem.Instance?.AddStump(player, corpse, bone.parent, part, type, proximal, axis, flow, true, flow * 0.4f, $"{type} stump");
+            // The artery opens on the cut, next to the bone (where the texture draws it).
+            var vesselAt = cutAt + Vector3.ProjectOnPlane(front, axis).normalized * (0.15f * (cap != null ? cutRadius : radius));
+            BleedSystem.Instance?.AddStump(player, corpse, bone.parent, part, type, vesselAt, axis, flow, true, flow * 0.4f, $"{type} stump");
 
             var dir = velocity.sqrMagnitude > 1e-4f ? velocity.normalized : axis;
-            if (Plugin.GoreGibs.Value) Gibs(player, proximal, dir, Random.Range(4, 9), 0.3f, 0.8f);
-            BloodMist.Instance?.Puff(proximal, dir, 0.18f, 0.9f, 14, 2f);
-            BloodParticles.Instance?.Emit(proximal, dir * 6f, 40f, 40, 0.011f);
-            Splash(proximal, dir, 2.5f, 25, 0.2f);
+            if (Plugin.GoreGibs.Value) Gibs(player, cutAt, dir, Random.Range(4, 9), 0.3f, 0.8f);
+            if (Blood)
+            {
+                BloodMist.Instance?.Puff(cutAt, dir, 0.18f, 0.9f, 14, 2f);
+                BloodParticles.Instance?.Emit(cutAt, dir * 6f, 40f, 40, 0.011f);
+                Splash(cutAt, dir, 2.5f, 25, 0.2f);
+            }
 
             Plugin.Log.LogInfo($"[Gore] {player.Profile?.Nickname}: {type} severed ({why}){(corpse ? " [corpse]" : " [killing shot]")}: " +
-                               $"{group.Count} bone(s) collapsed, piece {triangles} triangles");
+                               $"{group.Count} bone(s) collapsed, piece {triangles} triangles, {cutNote}, " +
+                               $"cut {Along(Vector3.Dot(cutAt - proximal, axis), "past", "on the body side of")} the joint ({cutMs:F1} ms)");
+            RaiseGore(player, $"{Autopsy.AutopsyText.Collider(type, true)} severed", why);
             return true;
         }
+
+        /// <summary>
+        /// A signed offset along the cut axis in words. Gore retest (2026-10-18): "cut -2.2 cm down the limb" read as a bug;
+        /// forearm cuts land on the upper-arm side of the elbow pivot because the skin's weights hand over there.
+        /// </summary>
+        /// <summary>Distance from <paramref name="point"/> to the line through <paramref name="origin"/> along unit <paramref name="dir"/>.</summary>
+        private static float Distance(Vector3 point, Vector3 origin, Vector3 dir) => Vector3.Cross(point - origin, dir).magnitude;
+
+        private static string Along(float metres, string positive, string negative) =>
+            $"{Mathf.Abs(metres) * 100f:F1} cm {(metres >= 0f ? positive : negative)}";
 
         private static float Mass(EBodyPartColliderType type)
         {
@@ -935,7 +1120,7 @@ namespace RealTargets.Gore
         /// The cut bone plus same-named twist bones (Forearm1/2/3, Thigh1/2) that aren't already
         /// under another member; collapsing them all removes the whole segment and what hangs below.
         /// </summary>
-        private static List<Transform> TwistGroup(Player player, Transform bone, string key)
+        private static List<Transform> TwistGroup(Component player, Transform bone, string key)
         {
             var all = new List<Transform> { bone };
             foreach (var t in player.GetComponentsInChildren<Transform>())
@@ -956,91 +1141,49 @@ namespace RealTargets.Gore
         }
 
         /// <summary>
-        /// Cuts the severed part out of the body's current pose: every LOD0 skin's triangles whose three
-        /// vertices are mostly (>= 50 %) skinned to the removed bones become a static mesh with the
-        /// skin's own materials, under one rigidbody thrown with <paramref name="velocity"/>.
-        /// Returns the triangle count (0 = nothing found: no piece).
+        /// Cuts the severed part out of the body's current pose: every LOD0 skin's triangles that the cut plan gives to the
+        /// removed bones (SkinCut.Plan: all three vertices weighted past the ragged threshold; the body loses exactly
+        /// these) become a static mesh with the skin's own materials, under one rigidbody thrown with
+        /// <paramref name="velocity"/>. Its cut end is closed on its own edge (1.1.0 gore pass; 0.10.4 until then: a disc fitted to the
+        /// open-edge points near the proximal end). Returns the triangle count (0 = nothing found: no piece).
         /// </summary>
-        private int ExtractPiece(Player owner, string label, List<SkinnedMeshRenderer> skins, List<Transform> cut, Vector3 proximal, Vector3 axis, float radius,
-            int layer, Vector3 velocity, float mass)
+        private int ExtractPiece(Player owner, string label, List<SkinCut> plans, Vector3 proximal, Vector3 axis, float radius,
+            int layer, Vector3 velocity, float mass, Vector3 front)
         {
             var root = new GameObject("RealTargetsSevered") { layer = LayersMaskController.DeadbodyLayer };
             root.transform.SetPositionAndRotation(proximal, Quaternion.LookRotation(axis, Mathf.Abs(axis.y) < 0.95f ? Vector3.up : Vector3.forward));
             var bounds = new Bounds(Vector3.zero, Vector3.zero);
             bool boundsSet = false;
             int total = 0;
-            var openEdge = new List<Vector3>();
-
-            foreach (var smr in skins)
+            foreach (var plan in plans)
             {
-                var mesh = smr.sharedMesh;
-                var bones = smr.bones;
-                if (!mesh.isReadable || bones == null) continue;
-                var weights = mesh.boneWeights;
-                if (weights == null || weights.Length != mesh.vertexCount) continue;
-
-                var inCut = new bool[bones.Length];
-                bool anyBone = false;
-                for (int i = 0; i < bones.Length; i++)
-                {
-                    if (bones[i] == null) continue;
-                    foreach (var c in cut)
-                    {
-                        if (bones[i].IsChildOf(c))
-                        {
-                            inCut[i] = true;
-                            anyBone = true;
-                            break;
-                        }
-                    }
-                }
-                if (!anyBone) continue;
-
-                var share = new float[weights.Length];
-                for (int v = 0; v < weights.Length; v++)
-                {
-                    var w = weights[v];
-                    float s = 0f;
-                    if (w.boneIndex0 < inCut.Length && inCut[w.boneIndex0]) s += w.weight0;
-                    if (w.boneIndex1 < inCut.Length && inCut[w.boneIndex1]) s += w.weight1;
-                    if (w.boneIndex2 < inCut.Length && inCut[w.boneIndex2]) s += w.weight2;
-                    if (w.boneIndex3 < inCut.Length && inCut[w.boneIndex3]) s += w.weight3;
-                    share[v] = s;
-                }
-
-                var baked = new Mesh();
-                smr.BakeMesh(baked, false);
-                var bv = baked.vertices;
-                var bn = baked.normals;
-                var uv = mesh.uv;
-                Destroy(baked);
-
+                if (!plan.Lod0) continue;
                 var map = new Dictionary<int, int>();
                 var vertices = new List<Vector3>();
                 var normals = new List<Vector3>();
                 var uvs = new List<Vector2>();
                 var submeshes = new List<List<int>>();
                 var materials = new List<Material>();
-                var src = smr.sharedMaterials;
-                for (int sub = 0; sub < mesh.subMeshCount; sub++)
+                var src = plan.Renderer.sharedMaterials;
+                for (int sub = 0; sub < plan.Tris.Length; sub++)
                 {
-                    var tris = mesh.GetTriangles(sub);
+                    var tris = plan.Tris[sub];
+                    var removed = plan.Removed[sub];
                     var kept = new List<int>();
                     for (int t = 0; t + 2 < tris.Length; t += 3)
                     {
-                        int a = tris[t], b = tris[t + 1], c = tris[t + 2];
-                        if (share[a] < 0.5f || share[b] < 0.5f || share[c] < 0.5f) continue;
-                        foreach (int v in new[] { a, b, c })
+                        if (!removed[t / 3]) continue;
+                        for (int e = 0; e < 3; e++)
                         {
+                            int v = tris[t + e];
                             if (!map.TryGetValue(v, out int nv))
                             {
                                 nv = vertices.Count;
                                 map[v] = nv;
-                                var world = smr.transform.TransformPoint(bv[v]);
-                                var local = root.transform.InverseTransformPoint(world);
+                                var local = root.transform.InverseTransformPoint(plan.World[v]);
                                 vertices.Add(local);
-                                normals.Add(root.transform.InverseTransformDirection(smr.transform.TransformDirection(v < bn.Length ? bn[v] : Vector3.up)));
-                                uvs.Add(v < uv.Length ? uv[v] : Vector2.zero);
+                                normals.Add(root.transform.InverseTransformDirection(plan.WorldNormal[v]));
+                                uvs.Add(plan.Uv != null && v < plan.Uv.Length ? plan.Uv[v] : Vector2.zero);
                                 if (!boundsSet)
                                 {
                                     bounds = new Bounds(local, Vector3.zero);
@@ -1057,7 +1200,6 @@ namespace RealTargets.Gore
                     total += kept.Count / 3;
                 }
                 if (submeshes.Count == 0) continue;
-                CollectOpenEdges(vertices, submeshes, openEdge);
 
                 var part = new Mesh { name = "RealTargetsSeveredPart" };
                 if (vertices.Count > 65000) part.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
@@ -1074,6 +1216,7 @@ namespace RealTargets.Gore
                 var renderer = go.AddComponent<MeshRenderer>();
                 renderer.sharedMaterials = materials.ToArray();
                 go.AddComponent<OwnedMesh>().Mesh = part;
+
             }
 
             if (total == 0)
@@ -1082,21 +1225,29 @@ namespace RealTargets.Gore
                 return 0;
             }
 
-            // The piece's own cut end, facing back toward the body, on the piece's real open end (0.10.4).
-            // The cut follows the skin weights, a few cm past the joint: a cap at the joint floated above the
-            // severed leg with a visible gap (0.10.3 test).
-            var capAt = proximal;
+            Vector3 capAt = proximal;
             float capRadius = radius;
-            if (FitOpenEnd(openEdge, out var ringCentre, out float ringRadius))
+            // The piece's cut end, chosen like the body's (gore build test: the most proximal edge rule capped a 2.3 cm loop
+            // and left the trouser end open): the longest loop, plus any inner layer sticking out past it.
+            GameObject cap = null;
+            foreach (var (loop, main, _) in PickRingsOf(plans, true, proximal, -axis))
             {
-                capAt = root.transform.TransformPoint(ringCentre);
-                capRadius = Mathf.Clamp(ringRadius * 1.1f, 0.03f, 0.1f);
+                var lid = GoreMeshes.RingCap(root.transform, loop, -axis, front, GoreMeshes.StumpKind.Limb, layer, out var at, out float r, stub: main);
+                if (!main || lid == null) continue;
+                cap = lid;
+                capAt = at;
+                capRadius = r;
             }
-            GoreMeshes.Stump(root.transform, capAt, -axis, capRadius, layer);
+            if (cap == null)
+            {
+                capAt = proximal;
+                capRadius = radius;
+                GoreMeshes.Stump(root.transform, proximal, -axis, radius, layer);
+            }
             if (Plugin.LogBlood.Value)
             {
-                Plugin.Log.LogInfo($"[Gore] {label}: piece cap {Vector3.Distance(capAt, proximal) * 100f:F1} cm from the joint, r {capRadius * 100f:F1} cm " +
-                                   $"({openEdge.Count} open-edge points)");
+                Plugin.Log.LogInfo($"[Gore] {label}: piece cap {(cap != null ? "on its cut edge" : "round (no edge found)")} " +
+                                   $"{Vector3.Distance(capAt, proximal) * 100f:F1} cm from the joint, r {capRadius * 100f:F1} cm");
             }
 
             // 0.10.7 (0.10.6 test: a severed leg "left floating 20-30 cm from the ground"): one box of 85 % of
@@ -1105,7 +1256,7 @@ namespace RealTargets.Gore
             int hulls = 0;
             foreach (var filter in root.GetComponentsInChildren<MeshFilter>())
             {
-                if (filter.sharedMesh == null || filter.sharedMesh.vertexCount < 4) continue;
+                if (filter.sharedMesh == null || filter.sharedMesh.vertexCount < 4 || filter.name != "part") continue;
                 var hull = new GameObject("hull") { layer = LayersMaskController.DeadbodyLayer };
                 hull.transform.SetParent(filter.transform, false);
                 var mc = hull.AddComponent<MeshCollider>();
@@ -1129,78 +1280,239 @@ namespace RealTargets.Gore
             var piece = root.AddComponent<GorePiece>();
             piece.Label = label;
             piece.Init(rb, owner);
+            // What runs out of a severed limb by gravity: about half its blood (7 % of its mass): forearm ~55 ml, calf ~135,
+            // thigh 220 (capped). As a 2.5 mm film: a pool of ~17 cm (forearm) to ~33 cm (thigh) across.
+            piece.BleedFromCut(root.transform.InverseTransformPoint(capAt), root.transform.InverseTransformDirection(-axis),
+                Mathf.Clamp(mass * 30f, 50f, 220f));
             Track(root);
             return total;
         }
 
         /// <summary>
-        /// Adds the end points of every open edge (used by one triangle only) of one extracted skin to
-        /// <paramref name="into"/> (piece-local). Vertices are welded by position (1 mm) first, so UV seams
-        /// don't count as open.
+        /// A ragged cut line around <paramref name="axis"/> through <paramref name="pivot"/>: the weight share a vertex needs
+        /// to go with the removed part, 0.3-0.72 by its angle around the limb or neck (2, 3 and 5 teeth around, random phases),
+        /// so the edge wanders across the weight gradient instead of following it in a smooth ring (SkinCut.Connect keeps it
+        /// one line).
         /// </summary>
-        private static void CollectOpenEdges(List<Vector3> vertices, List<List<int>> submeshes, List<Vector3> into)
+        private static System.Func<Vector3, float> RaggedThreshold(Vector3 pivot, Vector3 axis)
         {
-            long Key(Vector3 p) =>
-                ((long)(Mathf.RoundToInt(p.x * 1000f) & 0xFFFFF) << 40) | ((long)(Mathf.RoundToInt(p.y * 1000f) & 0xFFFFF) << 20) |
-                (long)(Mathf.RoundToInt(p.z * 1000f) & 0xFFFFF);
-
-            var count = new Dictionary<(long, long), int>();
-            var where = new Dictionary<(long, long), (Vector3, Vector3)>();
-            foreach (var tris in submeshes)
+            axis = axis.sqrMagnitude > 1e-6f ? axis.normalized : Vector3.up;
+            var u = Vector3.Cross(axis, Mathf.Abs(axis.y) < 0.9f ? Vector3.up : Vector3.forward).normalized;
+            var v = Vector3.Cross(axis, u);
+            float p1 = Random.Range(0f, 6.28f), p2 = Random.Range(0f, 6.28f), p3 = Random.Range(0f, 6.28f);
+            return w =>
             {
-                for (int t = 0; t + 2 < tris.Count; t += 3)
+                var d = w - pivot;
+                float a = Mathf.Atan2(Vector3.Dot(d, v), Vector3.Dot(d, u));
+                // Gore build test: 3/5/11 teeth around the limb were narrower than the mesh's triangles and broke it into islands.
+                return Mathf.Clamp(0.5f + 0.13f * Mathf.Sin(2f * a + p1) + 0.08f * Mathf.Sin(3f * a + p2) + 0.04f * Mathf.Sin(5f * a + p3), 0.3f, 0.72f);
+            };
+        }
+
+        /// <summary>
+        /// Puts the planned cuts on the body's skins (undone in Restore) and closes the cut: the main cap on the longest edge
+        /// loop, a lid on any inner layer that ends further out (PickRingsOf), each parented to the bone its rim now hangs on. Null = no usable edge (the caller puts the round cap).
+        /// </summary>
+        private GameObject ApplyCuts(Body body, List<SkinCut> plans, Vector3 pivot, Vector3 outward, Vector3 front, GoreMeshes.StumpKind kind,
+            int layer, Transform fallbackParent, out Vector3 centre, out float radius, out string note)
+        {
+            centre = pivot;
+            radius = 0f;
+            int applied = 0, removed = 0;
+            foreach (var cut in plans)
+            {
+                if (!cut.Apply()) continue;
+                body.Meshes.Add((cut.Renderer, cut.Mesh, cut.Copy));
+                applied++;
+                removed += cut.RemovedCount;
+            }
+            GameObject cap = null;
+            string on = null;
+            int lids = 0;
+            foreach (var (loop, main, skin) in PickRingsOf(plans, false, pivot, outward))
+            {
+                var parent = skin.KeepBone != null ? skin.KeepBone : fallbackParent;
+                var lid = GoreMeshes.RingCap(parent, loop, outward, front, kind, layer, out var at, out float r, stub: main);
+                if (lid == null) continue;
+                if (main)
                 {
-                    for (int e = 0; e < 3; e++)
-                    {
-                        var p = vertices[tris[t + e]];
-                        var q = vertices[tris[t + (e + 1) % 3]];
-                        long a = Key(p), b = Key(q);
-                        if (a == b) continue;
-                        var k = a < b ? (a, b) : (b, a);
-                        count.TryGetValue(k, out int n);
-                        count[k] = n + 1;
-                        where[k] = (p, q);
-                    }
+                    cap = lid;
+                    centre = at;
+                    radius = r;
+                    float tilt = GoreMeshes.LastCapTilt;
+                    on = $"{skin.Renderer.name}'s edge ({loop.Count} edges, r {r * 100f:F1} cm" +
+                         $"{(tilt > 20f ? $", on its own plane {tilt:F0} deg off the axis" : "")})";
+                }
+                else
+                {
+                    // An inner layer's own lid hangs on the same bone; Restore removes it with the cap.
+                    lid.transform.SetParent(cap != null ? cap.transform : parent, true);
+                    if (cap == null) body.Attached.Add(lid);
+                    lids++;
                 }
             }
-            foreach (var pair in count)
+            // Open edges per LOD0 skin (gore-3 shoulder: which layer is left open when a cut shows holes).
+            var edgesPerSkin = new List<string>();
+            foreach (var cut in plans)
             {
-                if (pair.Value != 1) continue;
-                var (p, q) = where[pair.Key];
-                into.Add(p);
-                into.Add(q);
+                if (!cut.Lod0 || cut.Ring == null || cut.Ring.Count == 0) continue;
+                GoreMeshes.LargestLoop(cut.Ring, out float longest);
+                edgesPerSkin.Add($"{cut.Renderer.name.Replace("_lod0", "")} {GoreMeshes.LoopCount(cut.Ring)} loop(s), longest {longest * 100f:F0} cm");
+            }
+            note = $"{applied}/{plans.Count} skin(s) cut ({removed} triangles off)" +
+                   (cap != null ? $", cap on {on}{(lids > 0 ? $" + {lids} inner lid(s)" : "")}" : ", no closed edge: round cap") +
+                   (edgesPerSkin.Count > 0 ? $" [open edges: {string.Join("; ", edgesPerSkin)}]" : "") +
+                   (SkinCut.LastSkipped.Count > 0 ? $" [not cut: {string.Join("; ", SkinCut.LastSkipped)}]" : "");
+            if (cap == null) centre = pivot;
+            return cap;
+        }
+
+        /// <summary>
+        /// Which cut edges get a lid, for the body side (SkinCut.Ring) or the piece (PieceRing): each LOD0 skin's longest
+        /// loop; the longest of all is the main cap (with the bone end), usually the outermost layer (sleeve, trousers,
+        /// balaclava). A loop of another layer ending >= 1.5 cm further out along <paramref name="outward"/> (skin out of a
+        /// torn sleeve) gets its own lid, or its open end would show. Main first.
+        /// </summary>
+        private static List<(List<(Vector3 a, Vector3 b)> loop, bool main, SkinCut skin)> PickRingsOf(List<SkinCut> plans, bool piece,
+            Vector3 pivot, Vector3 outward)
+        {
+            var found = new List<(List<(Vector3, Vector3)> loop, float length, float along, SkinCut skin)>();
+            foreach (var cut in plans)
+            {
+                if (!cut.Lod0) continue;
+                var loop = GoreMeshes.LargestLoop(piece ? cut.PieceRing : cut.Ring, out float length);
+                if (loop.Count < 6) continue;
+                var mid = Vector3.zero;
+                foreach (var (a, b) in loop) mid += a + b;
+                mid /= loop.Count * 2;
+                found.Add((loop, length, Vector3.Dot(mid - pivot, outward), cut));
+            }
+            var result = new List<(List<(Vector3 a, Vector3 b)>, bool, SkinCut)>();
+            if (found.Count == 0) return result;
+            int main = 0;
+            for (int i = 1; i < found.Count; i++)
+            {
+                if (found[i].length > found[main].length) main = i;
+            }
+            result.Add((found[main].loop, true, found[main].skin));
+            for (int i = 0; i < found.Count; i++)
+            {
+                if (i != main && found[i].along > found[main].along + 0.015f) result.Add((found[i].loop, false, found[i].skin));
+            }
+            return result;
+        }
+
+        /// <summary>The body's front, flattened across <paramref name="up"/> (neck caps: trachea forward); else across the shot.</summary>
+        private static Vector3 BodyFront(Player player, Vector3 up, Vector3 dir)
+        {
+            Vector3 f = Vector3.zero;
+            try
+            {
+                var frame = BodyFrame.Build(player);
+                if (frame != null) f = frame.Forward;
+            }
+            catch (System.Exception)
+            {
+                // No frame: fall back to the shot.
+            }
+            f = Vector3.ProjectOnPlane(f, up);
+            if (f.sqrMagnitude < 1e-4f) f = Vector3.ProjectOnPlane(-dir, up);
+            if (f.sqrMagnitude < 1e-4f) f = Vector3.ProjectOnPlane(Vector3.forward, up);
+            return f.normalized;
+        }
+
+        /// <summary>Gore-only mode (Visuals > Enabled off): gibs and caps stay, our blood (mist, droplets, splashes) doesn't.</summary>
+        private static bool Blood => Plugin.VisualsEnabled.Value;
+
+        // ---- Shared --------------------------------------------------------------------------------
+
+        /// <summary>What a cut on a body without a live Player changed, so it can be put back (the death screen's preview).</summary>
+        internal sealed class PreviewChanges
+        {
+            public readonly List<(SkinnedMeshRenderer renderer, Mesh original, Mesh copy)> Meshes = new List<(SkinnedMeshRenderer, Mesh, Mesh)>();
+            public readonly List<(Transform bone, Vector3 scale)> Scaled = new List<(Transform, Vector3)>();
+            public readonly List<GameObject> Attached = new List<GameObject>();
+
+            public void Undo()
+            {
+                for (int i = Scaled.Count - 1; i >= 0; i--)
+                {
+                    if (Scaled[i].bone != null) Scaled[i].bone.localScale = Scaled[i].scale;
+                }
+                Scaled.Clear();
+                foreach (var go in Attached)
+                {
+                    if (go != null) Destroy(go);
+                }
+                Attached.Clear();
+                for (int i = Meshes.Count - 1; i >= 0; i--)
+                {
+                    var (renderer, original, copy) = Meshes[i];
+                    if (renderer != null && renderer.sharedMesh == copy) renderer.sharedMesh = original;
+                    if (copy != null) Destroy(copy);
+                }
+                Meshes.Clear();
             }
         }
 
         /// <summary>
-        /// The ring where the piece was cut: open-edge points within 8 cm of the most proximal one (piece
-        /// local +Z runs down the limb; a trouser hem at the ankle is open too and is left out). Centre =
-        /// their mean; radius = 80th percentile of their distance from the limb axis through it (the
-        /// outermost layer, clothes over skin).
+        /// The death screen (1.1.0): takes the head (<paramref name="bone"/> = head bone) or a limb off a body with no live
+        /// Player (EFT's results-screen PMC), the way DestroyHead/Sever do on bots: the skins cut along a ragged line, the
+        /// cut closed on its own edge, the part collapsed. No piece, gibs or blood. Everything goes into <paramref name="changes"/>.
         /// </summary>
-        private static bool FitOpenEnd(List<Vector3> points, out Vector3 centre, out float radius)
+        internal static string CutPreview(Component root, Transform bone, bool head, Vector3 front, int layer, PreviewChanges changes)
         {
-            centre = Vector3.zero;
-            radius = 0f;
-            if (points.Count < 6) return false;
-            float minZ = float.MaxValue;
-            foreach (var p in points) minZ = Mathf.Min(minZ, p.z);
-            var ring = new List<Vector3>();
-            foreach (var p in points)
+            if (root == null || bone == null || bone.parent == null) return "no bone";
+            List<Transform> group;
+            Vector3 pivot = bone.position, axis;
+            if (head)
             {
-                if (p.z < minZ + 0.08f) ring.Add(p);
+                group = new List<Transform> { bone };
+                axis = (bone.position - bone.parent.position).normalized;
             }
-            if (ring.Count < 6) return false;
-            foreach (var p in ring) centre += p;
-            centre /= ring.Count;
-            var d = new List<float>(ring.Count);
-            foreach (var p in ring) d.Add(new Vector2(p.x - centre.x, p.y - centre.y).magnitude);
-            d.Sort();
-            radius = d[Mathf.Min(d.Count - 1, Mathf.FloorToInt(d.Count * 0.8f))];
-            return radius > 0.01f;
-        }
+            else
+            {
+                group = TwistGroup(root, bone, Prefix(bone.name));
+                Transform child = null;
+                foreach (Transform c in bone)
+                {
+                    if (c.name.StartsWith("Base Human")) { child = c; break; }
+                }
+                axis = child != null ? (child.position - bone.position).normalized : (bone.position - bone.parent.position).normalized;
+            }
+            if (axis.sqrMagnitude < 1e-4f) axis = Vector3.up;
 
-        // ---- Shared --------------------------------------------------------------------------------
+            var plans = SkinCut.Plan(root, group, RaggedThreshold(pivot, axis));
+            int applied = 0;
+            foreach (var cut in plans)
+            {
+                if (!cut.Apply()) continue;
+                changes.Meshes.Add((cut.Renderer, cut.Mesh, cut.Copy));
+                applied++;
+            }
+            bool capped = false;
+            foreach (var (loop, main, skin) in PickRingsOf(plans, false, pivot, axis))
+            {
+                var parent = skin.KeepBone != null ? skin.KeepBone : bone.parent;
+                var lid = GoreMeshes.RingCap(parent, loop, axis, front, head ? GoreMeshes.StumpKind.Neck : GoreMeshes.StumpKind.Limb, layer,
+                    out _, out _, stub: main);
+                if (lid == null) continue;
+                changes.Attached.Add(lid);
+                capped |= main;
+            }
+            foreach (var b in group)
+            {
+                changes.Scaled.Add((b, b.localScale));
+                b.localScale = b.localScale * Collapsed;
+            }
+            if (!capped)
+            {
+                var stump = GoreMeshes.Stump(bone.parent, pivot - axis * 0.02f, axis, head ? 0.055f : 0.045f, layer);
+                if (stump != null) changes.Attached.Add(stump);
+            }
+            return $"{applied}/{plans.Count} skin(s) cut, {(capped ? "cap on the edge" : "round cap")}" +
+                   (SkinCut.LastSkipped.Count > 0 ? $" [not cut: {string.Join("; ", SkinCut.LastSkipped)}]" : "");
+        }
 
         private void Collapse(Body body, Transform bone)
         {
@@ -1344,6 +1656,7 @@ namespace RealTargets.Gore
         private void LateUpdate()
         {
             using var perf = RealTargets.Diagnostics.Perf.Measure(RealTargets.Diagnostics.PerfArea.Gore);
+            if (_limbHits.Count > 0) LateDeaths();
             if (_bodies.Count == 0) return;
             _release.Clear();
             foreach (var pair in _bodies)
@@ -1386,9 +1699,11 @@ namespace RealTargets.Gore
             }
             body.Attached.Clear();
             // Whole skins again. EFT's HeadSkin swaps its mesh itself when the face cover changes: only
-            // put ours back where our copy is still on.
-            foreach (var (renderer, original, copy) in body.Meshes)
+            // put ours back where our copy is still on. Newest first: a cut can be made on an earlier cut's or a
+            // skull burst's copy (1.1.0 gore pass), each entry's original being the one before it.
+            for (int i = body.Meshes.Count - 1; i >= 0; i--)
             {
+                var (renderer, original, copy) = body.Meshes[i];
                 if (renderer != null && renderer.sharedMesh == copy) renderer.sharedMesh = original;
                 if (copy != null) Destroy(copy);
             }

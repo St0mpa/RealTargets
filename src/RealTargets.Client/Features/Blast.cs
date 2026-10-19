@@ -3,6 +3,7 @@ using System.Linq;
 using System.Reflection;
 using Comfort.Common;
 using EFT;
+using EFT.Ballistics;
 using EFT.InventoryLogic;
 using HarmonyLib;
 using SPT.Reflection.Patching;
@@ -37,9 +38,39 @@ namespace RealTargets.Features
 
             protected override MethodBase GetTargetMethod() => Target();
 
-            [PatchPostfix]
-            private static void Postfix(IExplosiveItem grenadeItem, Vector3 explosionPosition)
+            [PatchPrefix]
+            private static void Prefix(IExplosiveItem grenadeItem, Vector3 explosionPosition)
             {
+                try
+                {
+                    Before.Clear();
+                    if (Plugin.ModEnabled.Value && Plugin.AutopsyEnabled.Value && grenadeItem != null && !grenadeItem.IsDummy)
+                    {
+                        Snapshot(grenadeItem, explosionPosition);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Before.Clear();
+                    Plugin.Log.LogWarning($"Blast: health snapshot failed: {ex.Message}");
+                }
+            }
+
+            [PatchPostfix]
+            private static void Postfix(IExplosiveItem grenadeItem, Vector3 explosionPosition, string playerProfileIDWhoThrew)
+            {
+                try
+                {
+                    if (Before.Count > 0) RecordBlastDamage(grenadeItem, explosionPosition, playerProfileIDWhoThrew);
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogWarning($"Blast: autopsy record failed: {ex.Message}");
+                }
+                finally
+                {
+                    Before.Clear();
+                }
                 try
                 {
                     if (Plugin.ModEnabled.Value && Plugin.BlastEnabled.Value && grenadeItem != null && !grenadeItem.IsDummy)
@@ -54,10 +85,167 @@ namespace RealTargets.Features
             }
         }
 
+        // ---- The autopsy's BLAST row (1.1.0, Stompa) ---------------------------------------------------------------
+        // EFT's blast damage (ExplosionSharedMethods.AffectPlayersShared -> BodyPartCollider.ApplyEnvironmentalDamage ->
+        // Player.ApplyDamageInfo, decompiled 2026-10-18) never goes through ApplyShot, so a bot killed by the wave alone had
+        // no row. It is applied synchronously inside Explosion, to living players only; the fragments are only queued
+        // there (BallisticsCalculator.Shots, flown next update). So health before vs after Explosion = the blast alone.
+
+        private static readonly EBodyPart[] Parts =
+        {
+            EBodyPart.Head, EBodyPart.Chest, EBodyPart.Stomach, EBodyPart.LeftArm, EBodyPart.RightArm, EBodyPart.LeftLeg, EBodyPart.RightLeg,
+        };
+
+        private static readonly System.Collections.Generic.List<(Player player, float[] hp)> Before =
+            new System.Collections.Generic.List<(Player, float[])>(8);
+
+        private static void Snapshot(IExplosiveItem grenadeItem, Vector3 at)
+        {
+            if (!Singleton<GameWorld>.Instantiated) return;
+            float range = Mathf.Max(grenadeItem.MaxExplosionDistance * 2f, 10f);
+            foreach (var player in Singleton<GameWorld>.Instance.AllAlivePlayersList)
+            {
+                if (player == null || !player.IsAI || player.IsYourPlayer || player.HealthController == null || !player.HealthController.IsAlive) continue;
+                if ((player.Position - at).sqrMagnitude > range * range) continue;
+                var hp = new float[Parts.Length];
+                for (int i = 0; i < Parts.Length; i++) hp[i] = player.HealthController.GetBodyPartHealth(Parts[i], true).Current;
+                Before.Add((player, hp));
+            }
+        }
+
+        private static void RecordBlastDamage(IExplosiveItem grenadeItem, Vector3 at, string throwerId)
+        {
+            string name = NameOf(grenadeItem);
+            float charge = Charge(name, grenadeItem);
+            bool ground = Physics.Raycast(at + Vector3.up * 0.05f, Vector3.down, 0.6f, LayersMaskController.HighPolyWithTerrainMask);
+            float w = charge * (ground ? 1.8f : 1f);
+            Player thrower = null;
+            if (!string.IsNullOrEmpty(throwerId) && Singleton<GameWorld>.Instantiated)
+            {
+                thrower = Singleton<GameWorld>.Instance.GetEverExistedPlayerByID(throwerId);
+            }
+
+            foreach (var (player, before) in Before)
+            {
+                var health = player != null ? player.HealthController : null;
+                if (health == null) continue;
+                bool alive = health.IsAlive;
+                float total = 0f;
+                var damage = new float[Parts.Length];
+                for (int i = 0; i < Parts.Length; i++)
+                {
+                    damage[i] = Mathf.Max(0f, before[i] - health.GetBodyPartHealth(Parts[i], true).Current);
+                    total += damage[i];
+                }
+                if (total < 0.5f) continue;
+
+                var chest = Chest(player);
+                float d = Vector3.Distance(chest, at);
+                var hit = new Hits.HitEvent
+                {
+                    Target = player,
+                    TargetName = player.Profile?.Nickname ?? "?",
+                    IsAI = player.IsAI,
+                    IsLocalPlayer = false,
+                    IsBlast = true,
+                    DamageType = EDamageType.Explosion,
+                    Weapon = ItemOf(grenadeItem),
+                    WeaponName = name,
+                    Origin = at,
+                    Direction = d > 1e-3f ? (chest - at) / d : Vector3.down,
+                    Distance = d,
+                    WallTime = DateTime.Now,
+                    WasAlive = true,
+                    Status = alive ? Hits.HitStatus.Alive : Hits.HitStatus.Killed,
+                    BlastCharge = charge,
+                    BlastKpa = Overpressure(w, d) * Cover(at, chest),
+                };
+                if (thrower != null)
+                {
+                    // Read off the Player directly: converting it to IPlayer needs the DissonanceVoip reference.
+                    var profile = thrower.Profile;
+                    hit.ShooterProfileId = thrower.ProfileId;
+                    hit.ShooterIsYou = thrower.IsYourPlayer;
+                    hit.ShooterName = profile?.Nickname ?? "?";
+                    hit.ShooterSide = thrower.Side;
+                    if (profile?.Info?.Settings != null) hit.ShooterRole = profile.Info.Settings.Role;
+                }
+
+                var colliders = player.PlayerBones != null ? player.PlayerBones.BodyPartCollidersDictionary : null;
+                for (int i = 0; i < Parts.Length; i++)
+                {
+                    if (damage[i] < 0.05f) continue;
+                    var collider = MainCollider(Parts[i]);
+                    var point = colliders != null && colliders.TryGetValue(collider, out var bpc) && bpc?.Collider != null
+                        ? bpc.Collider.bounds.center : chest;
+                    hit.Segments.Add(new Hits.HitSegment(Parts[i], collider, (EArmorPlateCollider)0, point, damage[i], damage[i], 0f, false, alive, 0f, hit.Direction));
+                    var value = health.GetBodyPartHealth(Parts[i], true);
+                    hit.HealthAfter[Parts[i]] = (value.Current, value.Maximum);
+                }
+                if (Plugin.LogBlood.Value)
+                {
+                    Plugin.Log.LogInfo($"[Blast] {name} {hit.TargetName}: blast damage {total:F0} HP at {d:F1} m (~{hit.BlastKpa:F0} kPa)" +
+                                       $"{(alive ? "" : ", KILLED")}, thrower {(thrower != null ? thrower.Profile?.Nickname : "unknown")}");
+                }
+                Autopsy.AutopsyRecords.OnBlast(hit);
+            }
+        }
+
+        private static EBodyPartColliderType MainCollider(EBodyPart part) => part switch
+        {
+            EBodyPart.Head => EBodyPartColliderType.HeadCommon,
+            EBodyPart.Chest => EBodyPartColliderType.RibcageUp,
+            EBodyPart.Stomach => EBodyPartColliderType.RibcageLow,
+            EBodyPart.LeftArm => EBodyPartColliderType.LeftUpperArm,
+            EBodyPart.RightArm => EBodyPartColliderType.RightUpperArm,
+            EBodyPart.LeftLeg => EBodyPartColliderType.LeftThigh,
+            _ => EBodyPartColliderType.RightThigh,
+        };
+
+        /// <summary>
+        /// The explosive's item: a hand grenade is one; a 40 mm or VOG round's charge is a component of the round
+        /// (`ExplosiveAmmoComponent`). Gore build test: an FN40GL round logged as "explosive" and got the 0.08 kg fallback.
+        /// </summary>
+        private static Item ItemOf(IExplosiveItem explosive) => explosive as Item ?? (explosive as ItemComponent)?.Item;
+
+        /// <summary>
+        /// The explosive's short name. Gore retest (2026-10-18): the FN40GL round still read "explosive": EFT passes the round's
+        /// `ExplosiveAmmoComponent`, a `ReadonlyItemComponent` that holds only its template (no Item, decompiled
+        /// ItemComponent.Types), so the name comes from the template's localized short name ("M441").
+        /// </summary>
+        private static string NameOf(IExplosiveItem explosive)
+        {
+            var item = ItemOf(explosive);
+            if (item != null) return Hits.HitCollector.ItemName(item);
+            if (explosive is ExplosiveAmmoComponent round && round.Template is ItemTemplate template)
+            {
+                try
+                {
+                    string name = template.ShortNameLocalizationKey.Localized();
+                    if (!string.IsNullOrWhiteSpace(name) && name != template.ShortNameLocalizationKey) return name;
+                }
+                catch (Exception)
+                {
+                    // Localization not ready: fall through to the template's own name.
+                }
+                if (!string.IsNullOrWhiteSpace(template._name)) return template._name;
+            }
+            return "explosive";
+        }
+
+        /// <summary>A launched round's calibre (`Caliber40x46`, `Caliber40mmRU`, `Caliber30x29`); empty for a hand grenade.</summary>
+        private static string CaliberOf(IExplosiveItem explosive) =>
+            explosive is ExplosiveAmmoComponent round && round.Template is AmmoTemplate ammo ? ammo.Caliber ?? "" : "";
+
         /// <summary>TNT-equivalent charge in kg (public figures, rounded).</summary>
         private static float Charge(string name, IExplosiveItem item)
         {
             string n = (name ?? "").ToUpperInvariant();
+            string calibre = CaliberOf(item).ToUpperInvariant();
+            // 40x46 HE (M406, M441, M381, M433, M386): 32-45 g Comp B. VOG-25 (40 mm RU) ~48 g A-IX-1, VOG-30 (30x29) ~36 g.
+            if (calibre.Contains("40X46")) return 0.045f;
+            if (calibre.Contains("40MMRU")) return 0.05f;
+            if (calibre.Contains("30X29")) return 0.04f;
             if (n.Contains("M67")) return 0.24f;      // 185 g Comp B
             if (n.Contains("RGD")) return 0.11f;      // 110 g TNT
             if (n.Contains("F-1") || n.Contains("F1")) return 0.06f; // 60 g TNT
@@ -85,7 +273,7 @@ namespace RealTargets.Features
 
         private static void Apply(IExplosiveItem grenadeItem, Vector3 at)
         {
-            string name = grenadeItem is Item item ? Hits.HitCollector.ItemName(item) : "explosive";
+            string name = NameOf(grenadeItem);
             float charge = Charge(name, grenadeItem);
             if (charge <= 0f || !Singleton<GameWorld>.Instantiated)
             {

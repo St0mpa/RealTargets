@@ -6,7 +6,7 @@ namespace RealTargets
         // Forge rule: `Username-ModName` (Stompa's Forge user is `stompa`, 2026-10-17). Also the BepInEx log source.
         public const string Name = "stompa-RealTargets";
         // Keep in sync with <Version> in RealTargets.Client.csproj.
-        public const string Version = "1.0.0";
+        public const string Version = "1.1.0";
 
         public const string SptCoreGuid = "com.SPT.core";
         public const string SptMinVersion = "4.1.3";

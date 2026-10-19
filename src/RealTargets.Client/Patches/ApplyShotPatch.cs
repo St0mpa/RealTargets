@@ -19,18 +19,43 @@ namespace RealTargets.Patches
     internal class ApplyShotPatch : ModulePatch
     {
         private static bool _failed;
+        private static bool _armourFailed;
 
         protected override MethodBase GetTargetMethod() =>
             AccessTools.Method(typeof(Player), nameof(Player.ApplyShot));
 
         [PatchPrefix]
-        private static void Prefix(Player __instance, ref DamageInfo damageInfo, out ShotSnapshot __state)
+        private static void Prefix(
+            Player __instance,
+            ref DamageInfo damageInfo,
+            EBodyPartColliderType colliderType,
+            EArmorPlateCollider armorPlateCollider,
+            out ShotSnapshot __state)
         {
             __state = new ShotSnapshot
             {
                 DamageInfo = damageInfo,
                 TargetAlive = __instance.HealthController != null && __instance.HealthController.IsAlive,
             };
+            if (_failed || _armourFailed) return;
+
+            // The armour piece and its durability before EFT damages it (the autopsy's armour report).
+            try
+            {
+                var armour = HitCollector.FindArmour(__instance, damageInfo, colliderType, armorPlateCollider);
+                if (armour != null)
+                {
+                    __state.Armour = armour;
+                    __state.DurabilityBefore = armour.Repairable != null ? armour.Repairable.Durability : 0f;
+                }
+            }
+            catch (Exception ex)
+            {
+                // Only the armour report stands down; hits are still captured.
+                _armourFailed = true;
+                HitCollector.ArmourLookupWorks = false;
+                Plugin.Log.LogError($"ApplyShotPatch: armour lookup disabled after error: {ex}");
+            }
         }
 
         [PatchPostfix]

@@ -299,8 +299,36 @@ namespace RealTargets.Gore
             });
         }
 
+        /// <summary>
+        /// One step of a drag streak (DragSmears): <paramref name="width"/> across, twice that along <paramref name="along"/>,
+        /// centred on <paramref name="point"/>; wet (cell 8) or drying (cell 9) by <paramref name="wetness"/>, which also sets
+        /// its alpha (thinner under the lit pass's cutout as the cloth runs dry).
+        /// </summary>
+        internal void DragStreak(Vector3 point, Vector3 normal, Vector3 along, float width, float wetness)
+        {
+            if (!Ready()) return;
+            normal = normal.normalized;
+            var axis = Vector3.ProjectOnPlane(along, normal);
+            if (axis.sqrMagnitude < 1e-6f) return;
+            wetness = Mathf.Clamp01(wetness);
+            Add(new Mark
+            {
+                Point = point,
+                Normal = normal,
+                Axis = axis.normalized,
+                Size = width,
+                Stretch = 2f,
+                Atlas = wetness > 0.45f ? 8 : 9,
+                // Mirrored across at random: the same cell every half length would show its pattern repeating.
+                Mirror = Random.value < 0.5f,
+                Key = long.MinValue,
+                Alpha = (byte)Mathf.RoundToInt(Mathf.Lerp(120f, 235f, wetness) * Random.Range(0.92f, 1f)),
+                Light = LightAt(point, normal),
+            });
+        }
+
         /// <summary>One step of a smear left by something sliding along <paramref name="along"/> (a gib down a wall).</summary>
-        internal void Smear(Vector3 point, Vector3 normal, Vector3 along, float width)
+        internal void Smear(Vector3 point, Vector3 normal, Vector3 along, float width, float wetness = 1f)
         {
             if (!Ready()) return;
             normal = normal.normalized;
@@ -315,7 +343,7 @@ namespace RealTargets.Gore
                 Stretch = 1.6f,
                 Atlas = 7,
                 Key = long.MinValue,
-                Alpha = (byte)Random.Range(170, 230),
+                Alpha = (byte)Mathf.RoundToInt(Random.Range(170f, 230f) * Mathf.Lerp(0.45f, 1f, Mathf.Clamp01(wetness))),
                 Light = LightAt(point, normal),
             });
         }
@@ -424,8 +452,9 @@ namespace RealTargets.Gore
             chunk.Vertices[v + 2] = c + t + b;
             chunk.Vertices[v + 3] = c - t + b;
 
-            // 4x2 atlas (0.10.6): row 0 drips/splats, row 1 footprints (wet, medium, faint) and the smear.
-            float u0 = (m.Atlas % 4) * 0.25f + 0.002f, v0 = (m.Atlas / 4) * 0.5f + 0.004f, su = 0.246f, sv = 0.492f;
+            // 4x4 atlas (gore-5; 4x2 since 0.10.6): row 0 drips/splats, row 1 footprints (wet, medium, faint) and the smear,
+            // row 2 drag streaks (wet, drying); row 3 free.
+            float u0 = (m.Atlas % 4) * 0.25f + 0.002f, v0 = (m.Atlas / 4) * 0.25f + 0.002f, su = 0.246f, sv = 0.246f;
             // A left foot is the right foot's print mirrored across its length.
             float va = m.Mirror ? v0 + sv : v0, vb = m.Mirror ? v0 : v0 + sv;
             chunk.Uvs[v] = new Vector2(u0, va);
@@ -920,7 +949,7 @@ namespace RealTargets.Gore
         /// <summary>4x2 atlas, 128 px cells. Row 0: 0/1 round drips with satellites, 2 directional splat (runs toward +U), 3 star splat. Row 1 (0.10.6): 4-6 boot prints wet/medium/faint (toe toward +U, right foot), 7 smear (runs toward +U).</summary>
         internal static Texture2D MarkAtlas()
         {
-            const int width = 512, height = 256, cell = 128;
+            const int width = 512, height = 512, cell = 128;
             var pixels = new Color[width * height];
             var rng = new System.Random(77);
             for (int c = 0; c < 4; c++)
@@ -979,6 +1008,7 @@ namespace RealTargets.Gore
             }
             Footprints(pixels, width, cell);
             Smear(pixels, width, cell);
+            DragStreaks(pixels, width, cell);
             return Make(width, height, pixels);
         }
 
@@ -1066,6 +1096,48 @@ namespace RealTargets.Gore
         }
 
         private static float Sq(float v) => v * v;
+
+        /// <summary>
+        /// Cells 8 (wet) and 9 (drying): a drag streak (gore-5, Stompa: the first drag smears read as "droplets every here and
+        /// there", then as a painted strip with a ladder edge). A band of even width along U with ragged edges, fine stripes
+        /// along the drag (cloth pressed over the floor: noise stretched ~25x along U), soft ends so overlapping steps join
+        /// into one trail. Drying: narrower, the stripes break into dashes with gaps. Darker than a fresh pool (a thin film
+        /// over concrete). The mark's own alpha thins it further under the lit pass's cutout as the cloth runs dry.
+        /// </summary>
+        private static void DragStreaks(Color[] pixels, int width, int cell)
+        {
+            var wetColour = new Color(0.24f, 0.012f, 0.012f);
+            var dryColour = new Color(0.22f, 0.035f, 0.022f);
+            for (int level = 0; level < 2; level++)
+            {
+                int ox = level * cell, oy = 2 * cell;
+                bool dry = level == 1;
+                for (int j = 0; j < cell; j++)
+                {
+                    for (int i = 0; i < cell; i++)
+                    {
+                        float x = (i + 0.5f) / cell - 0.5f, y = (j + 0.5f) / cell - 0.5f;
+                        // Even width with a ragged, slowly wandering edge on each side.
+                        float side = y >= 0f ? 1f : 0f;
+                        float half = (dry ? 0.3f : 0.38f) + 0.05f * (Mathf.PerlinNoise(x * 3f + 4f + side * 7f, side * 3f) - 0.5f)
+                                     + 0.035f * (Mathf.PerlinNoise(x * 22f + 11f, side * 5f + 1f) - 0.5f);
+                        float band = 1f - Smooth(half - 0.03f, half, Mathf.Abs(y));
+                        // Stripes along the drag, wandering a little across it.
+                        float stripe = Mathf.PerlinNoise(x * 2.2f + 3f, y * 48f + 0.6f * Mathf.Sin(x * 5f) + 20f);
+                        float grain = Mathf.PerlinNoise(x * 18f + 40f, y * 18f + 7f);
+                        float cover = dry
+                            ? Smooth(0.45f, 0.62f, stripe * 0.8f + grain * 0.25f) * Smooth(0.25f, 0.4f, Mathf.PerlinNoise(x * 7f + 60f, y * 2f))
+                            : Mathf.Lerp(0.25f, 1f, Smooth(0.38f, 0.62f, stripe)) * Mathf.Lerp(0.8f, 1f, grain) *
+                              Mathf.Lerp(0.7f, 1f, Smooth(0.2f, 0.45f, Mathf.PerlinNoise(x * 5f + 80f, y * 3f)));
+                        // Soft ends (U +-0.5): the next step overlaps and takes over.
+                        float ends = Smooth(-0.5f, -0.3f, x) * (1f - Smooth(0.3f, 0.5f, x));
+                        var c = Color.Lerp(dry ? dryColour : wetColour, Rim * 0.8f, (1f - stripe) * 0.35f);
+                        c.a = band * cover * ends * 0.95f;
+                        pixels[(oy + j) * width + ox + i] = c;
+                    }
+                }
+            }
+        }
 
         /// <summary>Cell 7: a smear left by a gib sliding down a wall: wide where it stuck (-U), thinning toward +U, patchy.</summary>
         private static void Smear(Color[] pixels, int width, int cell)

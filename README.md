@@ -22,12 +22,21 @@ Purely visual: damage, bleeding HP loss, death and AI stay vanilla EFT (and SAIN
 - **Exit spray, blood mist and wall spatter** on whatever stands behind a through-shot.
 - **Pools** under bodies, sized by the blood that ran out, drying darker over time. **Bloody footprints** from
   anyone who walks through a wet pool.
-- **Dismemberment**, on kills and corpses only, never on a living bot:
+- **Entries by surface**: a wound on skin, a dark puncture on cloth, and on armour and gear the game's own hole.
+  Rounds that go through one part into the next (forearm into the chest) wound and bleed in both.
+- **Dismemberment**, cut out of the body along a ragged line with a cross-section of flesh and bone:
   - Heads come apart from close-range buckshot, slugs, 12.7 mm and similar, and grenades at very close range.
-  - High-energy rifle rounds (7.62x51, 7.62x54R and others) burst the skull open at the exit.
+  - High-energy rifle rounds (7.62x51, 7.62x54R and others) burst the skull open at the exit, following the head.
   - Repeated hits on a dead body's head add up.
-  - Limbs come off from 12.7 mm rifle/MG rounds and grenades.
-  - Gibs fly, stick to walls and slide down them. Helmets get thrown off.
+  - Limbs come off from 12.7 mm rifle/MG rounds and grenades, also when the hit is what kills.
+  - Severed limbs bleed and pool. Gibs fly, stick to walls and slide down them. Helmets get thrown off.
+- **Drag smears**: a dragged or shoved body leaves striped streaks from every soaked part (TraumaCore's drag too).
+- **AUTOPSY tab** next to LOOT on every body: each shot that hit it (shooter, weapon, ammo, distance, armour and what it
+  did, damage, path through the body, organs), the killing shot or cause of death, health at death, and a 3D X-ray of the
+  body in its death pose with skeleton, organ zones, wound channels and the temporary cavity.
+- **Death screen**: when you die, your PMC on the raid results shows what hit you, wounds, blood and a lost head or
+  limbs by the same rules. An **AUTOPSY** button (or X) switches to the autopsy of your own death: the X-ray in your
+  death pose, every shot and who fired it, the cause of death and your health at death.
 - **Corpse impacts**: bullets push dead bodies by their momentum, and grenade blasts throw nearby corpses.
 - No blood on doors, windows or other moving objects, so nothing hangs in mid-air when a door opens.
 - Lit by the map's own lighting: dark in dark rooms, wet sheen in the light.
@@ -47,8 +56,12 @@ switched off on its own, and the thresholds can be tuned:
 - **Blood**: blood volume, bleed rate, arterial chance, the last heartbeats after death, how long corpses keep draining.
 - **Visuals**: each blood effect on or off, decal shader, max distance (80 m).
 - **Gore**: dismemberment and gibs on or off. Energy thresholds for heads, skull bursts and limbs. Shotgun range
-  and how many pellets must hit the head.
+  and how many pellets must hit the head. Gore only: turn **Visuals / Enabled** off and keep Gore on.
+- **Autopsy**: the AUTOPSY tab on or off, only your own shots, the 3D skeleton, organ zones and cavities.
+- **Death screen**: your wounded PMC on the raid results, whose report shows (RealTargets, TraumaCore or both) and
+  the autopsy key (X).
 - **Impacts**: corpse pushes and blast throws.
+- **HollywoodFX / Prefer its blood** (only with HollywoodFX): let its blood replace ours at the moment of the hit.
 - **Hit model**: armour stop threshold, energy thresholds, temporary cavity size.
 - **Flinch** (off by default): living bots flinch per limb through EFT's own hit-reaction rig.
 - **Debug**: log hits, blood and wound placement to the BepInEx log (all off by default; turn on for a bug report).
@@ -63,8 +76,10 @@ switched off on its own, and the thresholds can be tuned:
     lower HollywoodFX's `Ragdoll Force Multiplier` or RealTargets' `Impacts > Push strength`.
   - **Ragdoll Kinetics**: works. Keep RealTargets' Flinch off with it (the default): the two reactions stack into an
     over-the-top one.
+  - **TraumaCore 1.7.0**: works. Both draw a report on the death screen; by default RealTargets shows its own and
+    hides TraumaCore's (**Death screen > Report** = TraumaCore or Both to change that). With HollywoodFX, turn
+    TraumaCore's Procedural World Blood off (it draws red squares then, and RealTargets already draws the blood).
   - **SAIN**, BigBrain, UI Fixes, LootNet, AmandsSense, Dynamic Maps: no conflicts.
-- **Reported by players:** TraumaCore runs fine.
 - **Fika is not supported.**
 - Tried it with another mod? Say so on the [Forge page](https://sp-mod.com/mod/3165/realtargets), works or not.
 - Performance: the mod's own CPU time averages about 0.1 ms per frame in a busy raid. Blood marks, pools and

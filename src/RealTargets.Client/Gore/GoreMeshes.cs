@@ -14,7 +14,7 @@ namespace RealTargets.Gore
     internal static class GoreMeshes
     {
         private const int Segments = 18;
-        private static Material _stump, _flesh, _bone, _crater, _brain;
+        private static Material _stump, _flesh, _bone, _crater, _brain, _neck, _limbCut;
         private static bool _made;
         private static Mesh _stumpMesh;
         private static readonly List<Mesh> GibMeshes = new List<Mesh>();
@@ -73,14 +73,18 @@ namespace RealTargets.Gore
         {
             if (_made) return;
             _made = true;
-            var stumpTex = StumpTexture();
             var fleshTex = GibTexture(false);
             var boneTex = GibTexture(true);
             var craterTex = CraterTexture();
             var brainTex = BrainTexture();
+            var neckTex = CutTexture(StumpKind.Neck);
+            var limbTex = CutTexture(StumpKind.Limb);
+            var stumpTex = limbTex;
             if (LitBlood.HasOpaque)
             {
                 Lit = true;
+                _neck = LitBlood.Opaque(neckTex, Color.white, 0.45f, "RealTargetsNeckCut");
+                _limbCut = LitBlood.Opaque(limbTex, Color.white, 0.45f, "RealTargetsLimbCut");
                 _stump = LitBlood.Opaque(stumpTex, Color.white, 0.8f, "RealTargetsStump");
                 _flesh = LitBlood.Opaque(fleshTex, Color.white, 0.75f, "RealTargetsGib");
                 _bone = LitBlood.Opaque(boneTex, Color.white, 0.35f, "RealTargetsGibBone");
@@ -89,6 +93,8 @@ namespace RealTargets.Gore
             }
             else
             {
+                _neck = Unlit(neckTex, "RealTargetsNeckCut");
+                _limbCut = Unlit(limbTex, "RealTargetsLimbCut");
                 _stump = Unlit(stumpTex, "RealTargetsStump");
                 _flesh = Unlit(fleshTex, "RealTargetsGib");
                 _bone = Unlit(boneTex, "RealTargetsGibBone");
@@ -131,7 +137,7 @@ namespace RealTargets.Gore
             get
             {
                 if (_stumpMesh != null) return _stumpMesh;
-                var vertices = new List<Vector3> { new Vector3(0f, 0f, 0.25f) };
+                var vertices = new List<Vector3> { new Vector3(0f, 0f, 0.08f) };
                 var uvs = new List<Vector2> { new Vector2(0.5f, 0.5f) };
                 var tris = new List<int>();
                 int rings = 3;
@@ -144,7 +150,7 @@ namespace RealTargets.Gore
                         // A little torn: the rim wobbles in and out.
                         float wobble = r == rings ? 1f + 0.12f * Mathf.Sin(a * 5f + 0.7f) + 0.06f * Mathf.Sin(a * 11f) : 1f;
                         float x = Mathf.Cos(a) * f * wobble, y = Mathf.Sin(a) * f * wobble;
-                        vertices.Add(new Vector3(x, y, 0.25f * (1f - f * f)));
+                        vertices.Add(new Vector3(x, y, 0.08f * (1f - f * f)));
                         uvs.Add(new Vector2(0.5f + 0.5f * Mathf.Cos(a) * f, 0.5f + 0.5f * Mathf.Sin(a) * f));
                     }
                 }
@@ -193,6 +199,393 @@ namespace RealTargets.Gore
             var r = go.AddComponent<MeshRenderer>();
             r.sharedMaterial = material;
             Shade(r);
+            return go;
+        }
+
+        /// <summary>The cut surface material for a neck or a limb (cross-section texture, 1.1.0 gore pass).</summary>
+        internal static Material CutMaterial(StumpKind kind)
+        {
+            MakeMaterials();
+            return kind == StumpKind.Neck ? _neck : _limbCut;
+        }
+
+        /// <summary>
+        /// The largest connected run of a cut's open edges (by length): the one loop around the neck or limb, without small
+        /// loops elsewhere on the skin (gore build test: a 2.3 cm loop got the severed thigh's cap, the trouser end stayed
+        /// open). Empty when there are none.
+        /// </summary>
+        /// <summary>How many separate open edges (connected loops) a cut left on one skin, for the log (more than one = a hole or an island).</summary>
+        internal static int LoopCount(List<(Vector3 a, Vector3 b)> edges)
+        {
+            if (edges == null || edges.Count == 0) return 0;
+            var parent = new Dictionary<long, long>();
+            long Find(long x)
+            {
+                while (parent.TryGetValue(x, out long p) && p != x)
+                {
+                    parent.TryGetValue(p, out long gp);
+                    parent[x] = gp;
+                    x = p;
+                }
+                return x;
+            }
+            foreach (var (a, b) in edges)
+            {
+                long ka = WeldKey(a), kb = WeldKey(b);
+                if (!parent.ContainsKey(ka)) parent[ka] = ka;
+                if (!parent.ContainsKey(kb)) parent[kb] = kb;
+                long ra = Find(ka), rb = Find(kb);
+                if (ra != rb) parent[ra] = rb;
+            }
+            int roots = 0;
+            foreach (var key in new List<long>(parent.Keys))
+            {
+                if (Find(key) == key) roots++;
+            }
+            return roots;
+        }
+
+        internal static List<(Vector3 a, Vector3 b)> LargestLoop(List<(Vector3 a, Vector3 b)> edges, out float length)
+        {
+            length = 0f;
+            var best = new List<(Vector3, Vector3)>();
+            if (edges == null || edges.Count == 0) return best;
+            var index = new Dictionary<long, int>();
+            int Point(Vector3 p)
+            {
+                long k = WeldKey(p);
+                if (!index.TryGetValue(k, out int i)) index[k] = i = index.Count;
+                return i;
+            }
+            var ends = new (int, int)[edges.Count];
+            var byPoint = new Dictionary<int, List<int>>();
+            for (int e = 0; e < edges.Count; e++)
+            {
+                ends[e] = (Point(edges[e].a), Point(edges[e].b));
+                foreach (int p in new[] { ends[e].Item1, ends[e].Item2 })
+                {
+                    if (!byPoint.TryGetValue(p, out var list)) byPoint[p] = list = new List<int>(2);
+                    list.Add(e);
+                }
+            }
+            var seen = new bool[edges.Count];
+            for (int s = 0; s < edges.Count; s++)
+            {
+                if (seen[s]) continue;
+                var loop = new List<(Vector3, Vector3)>();
+                float sum = 0f;
+                var stack = new Stack<int>();
+                stack.Push(s);
+                seen[s] = true;
+                while (stack.Count > 0)
+                {
+                    int e = stack.Pop();
+                    loop.Add(edges[e]);
+                    sum += Vector3.Distance(edges[e].a, edges[e].b);
+                    foreach (int p in new[] { ends[e].Item1, ends[e].Item2 })
+                    {
+                        foreach (int n in byPoint[p])
+                        {
+                            if (seen[n]) continue;
+                            seen[n] = true;
+                            stack.Push(n);
+                        }
+                    }
+                }
+                if (sum > length)
+                {
+                    length = sum;
+                    best = loop;
+                }
+            }
+            return best;
+        }
+
+        private static long WeldKey(Vector3 p) =>
+            ((long)(Mathf.RoundToInt(p.x * 1000f) & 0xFFFFF) << 40) | ((long)(Mathf.RoundToInt(p.y * 1000f) & 0xFFFFF) << 20) |
+            (long)(Mathf.RoundToInt(p.z * 1000f) & 0xFFFFF);
+
+        /// <summary>
+        /// Closes a cut on its own open edge (1.1.0 gore pass; SkinCut.Ring): every ring edge is joined through three inner rings to a
+        /// centre, so the lid follows the skin exactly instead of a round disc at the joint (the 1.1.0 neck cap hovered above
+        /// a cut inside a collar and read as a red ball). The rim stays on the edge, a lip just inside it sinks a little
+        /// (skin retracts), the middle bulges a few mm with noise (tissue pushed out), so it shades unevenly and never reads
+        /// as a dome. UVs: the texture's circle mapped onto the ring by angle and fraction of the rim's own radius, its +y
+        /// toward <paramref name="front"/> (neck: trachea at the front, spine at the back). Only the largest connected loop
+        /// of the edges is used (LargestLoop); points further than 3 x its median radius are dropped. Built in <paramref name="parent"/>'s space and
+        /// parented to it; the bone stub is a child. Null when the ring is too small or too broken (< 6 edges).
+        /// </summary>
+        /// <summary>Degrees between the last cap's own plane normal and the outward it was given (> 20 = built on its own plane).</summary>
+        internal static float LastCapTilt;
+
+        internal static GameObject RingCap(Transform parent, List<(Vector3 a, Vector3 b)> edges, Vector3 outward, Vector3 front, StumpKind kind,
+            int layer, out Vector3 centre, out float radius, bool stub = true)
+        {
+            centre = default;
+            radius = 0f;
+            var material = CutMaterial(kind);
+            edges = LargestLoop(edges, out _);
+            if (material == null || parent == null || edges.Count < 6) return null;
+            var n = outward.normalized;
+
+            var index = new Dictionary<long, int>();
+            var points = new List<Vector3>();
+            var pairs = new List<(int, int)>(edges.Count);
+            int Weld(Vector3 p)
+            {
+                long k = WeldKey(p);
+                if (index.TryGetValue(k, out int i)) return i;
+                i = points.Count;
+                index[k] = i;
+                points.Add(p);
+                return i;
+            }
+            foreach (var (a, b) in edges)
+            {
+                int ia = Weld(a), ib = Weld(b);
+                if (ia != ib) pairs.Add((ia, ib));
+            }
+            if (points.Count < 6) return null;
+
+            var c = Vector3.zero;
+            foreach (var p in points) c += p;
+            c /= points.Count;
+
+            // Close the cut across its own plane when the edge runs far from square to the limb (gore-3 test: a shoulder cut
+            // goes from the armpit up over the deltoid; across the arm's axis the cap stood in steep walls whose faces, culled
+            // from the side, showed as wedge-shaped holes in the pit). The plane: the edges' fan normals, all turned outward.
+            var plane = Vector3.zero;
+            foreach (var (ia, ib) in pairs)
+            {
+                var x = Vector3.Cross(points[ia] - c, points[ib] - c);
+                plane += Vector3.Dot(x, n) >= 0f ? x : -x;
+            }
+            LastCapTilt = plane.sqrMagnitude > 1e-12f ? Vector3.Angle(plane, n) : 0f;
+            if (LastCapTilt > 20f) n = plane.normalized;
+            var radial = new float[points.Count];
+            var sorted = new List<float>(points.Count);
+            for (int i = 0; i < points.Count; i++)
+            {
+                radial[i] = Vector3.ProjectOnPlane(points[i] - c, n).magnitude;
+                sorted.Add(radial[i]);
+            }
+            sorted.Sort();
+            float median = sorted[sorted.Count / 2];
+            var keep = new bool[points.Count];
+            var kc = Vector3.zero;
+            int kept = 0;
+            for (int i = 0; i < points.Count; i++)
+            {
+                keep[i] = radial[i] <= median * 3f + 0.01f;
+                if (!keep[i]) continue;
+                kc += points[i];
+                kept++;
+            }
+            if (kept < 6) return null;
+            c = kc / kept;
+            sorted.Clear();
+            for (int i = 0; i < points.Count; i++)
+            {
+                if (keep[i]) sorted.Add(Vector3.ProjectOnPlane(points[i] - c, n).magnitude);
+            }
+            sorted.Sort();
+            float r = sorted[Mathf.Min(sorted.Count - 1, Mathf.FloorToInt(sorted.Count * 0.8f))];
+            if (r < 0.01f) return null;
+
+            var f = Vector3.ProjectOnPlane(front, n);
+            if (f.sqrMagnitude < 1e-4f) f = Vector3.ProjectOnPlane(Mathf.Abs(n.y) < 0.9f ? Vector3.up : Vector3.forward, n);
+            f.Normalize();
+            var right = Vector3.Cross(f, n).normalized;
+
+            float s1 = Random.Range(0f, 50f), s2 = Random.Range(0f, 50f);
+            float[] ts = { 1f, 0.86f, 0.6f, 0.3f };
+            var world = new List<Vector3> { c + n * (r * (0.05f + 0.03f * Random.value)) };
+            var uvs = new List<Vector2> { new Vector2(0.5f, 0.5f) };
+            var first = new int[points.Count];
+            for (int i = 0; i < points.Count; i++)
+            {
+                first[i] = -1;
+                if (!keep[i]) continue;
+                var rel = points[i] - c;
+                float h = Vector3.Dot(rel, n);
+                var planar = rel - n * h;
+                float a = Mathf.Atan2(Vector3.Dot(planar, f), Vector3.Dot(planar, right));
+                float noise = Mathf.PerlinNoise(Mathf.Cos(a) * 1.7f + s1, Mathf.Sin(a) * 1.7f + s2);
+                first[i] = world.Count;
+                for (int k = 0; k < ts.Length; k++)
+                {
+                    float t = ts[k];
+                    Vector3 p;
+                    if (k == 0) p = points[i];
+                    else if (k == 1) p = c + planar * t + n * (h * 0.9f - r * (0.03f + 0.02f * noise));
+                    else p = c + planar * t + n * (h * t + r * (k == 2 ? 0.04f : 0.07f) + r * 0.07f * (noise - 0.4f));
+                    world.Add(p);
+                    uvs.Add(new Vector2(0.5f + 0.5f * t * Mathf.Cos(a), 0.5f + 0.5f * t * Mathf.Sin(a)));
+                }
+            }
+
+            var triangles = new List<int>(pairs.Count * 21);
+            void Tri(int x, int y, int z)
+            {
+                var normal = Vector3.Cross(world[y] - world[x], world[z] - world[x]);
+                triangles.Add(x);
+                if (Vector3.Dot(normal, n) >= 0f)
+                {
+                    triangles.Add(y);
+                    triangles.Add(z);
+                }
+                else
+                {
+                    triangles.Add(z);
+                    triangles.Add(y);
+                }
+            }
+            int edgesUsed = 0;
+            foreach (var (ia, ib) in pairs)
+            {
+                if (first[ia] < 0 || first[ib] < 0) continue;
+                int va = first[ia], vb = first[ib];
+                for (int k = 0; k < ts.Length - 1; k++)
+                {
+                    Tri(va + k, vb + k, vb + k + 1);
+                    Tri(va + k, vb + k + 1, va + k + 1);
+                }
+                Tri(va + ts.Length - 1, vb + ts.Length - 1, 0);
+                edgesUsed++;
+            }
+            if (edgesUsed < 6) return null;
+
+            // Both faces: a ragged rim twists parts of the cap away from a side view, where one-sided they'd be culled into holes.
+            int front1 = world.Count, faces = triangles.Count;
+            for (int i = 0; i < front1; i++)
+            {
+                world.Add(world[i]);
+                uvs.Add(uvs[i]);
+            }
+            for (int t = 0; t + 2 < faces; t += 3)
+            {
+                triangles.Add(triangles[t] + front1);
+                triangles.Add(triangles[t + 2] + front1);
+                triangles.Add(triangles[t + 1] + front1);
+            }
+
+            var local = new List<Vector3>(world.Count);
+            foreach (var p in world) local.Add(parent.InverseTransformPoint(p));
+            var mesh = new Mesh { name = "RealTargetsCutCap" };
+            mesh.SetVertices(local);
+            mesh.SetUVs(0, uvs);
+            mesh.SetTriangles(triangles, 0);
+            mesh.RecalculateNormals();
+            mesh.RecalculateTangents();
+            mesh.RecalculateBounds();
+
+            var go = new GameObject("RealTargetsStump") { layer = layer };
+            go.transform.SetParent(parent, false);
+            go.transform.localPosition = Vector3.zero;
+            go.transform.localRotation = Quaternion.identity;
+            go.transform.localScale = Vector3.one;
+            go.AddComponent<MeshFilter>().sharedMesh = mesh;
+            var renderer = go.AddComponent<MeshRenderer>();
+            renderer.sharedMaterial = material;
+            Shade(renderer);
+            go.AddComponent<OwnedMesh>().Mesh = mesh;
+
+            // The bone end, standing out of the cut: a limb's long bone a little off centre, the neck's vertebra at the back
+            // (where the texture draws them, so the stub sits on its own cross-section).
+            var surface = c + n * (r * 0.06f);
+            if (!stub)
+            {
+                // An inner layer sticking out past the main cap: closed, no second bone.
+            }
+            else if (kind == StumpKind.Neck)
+            {
+                BoneStub(go.transform, surface - f * (r * 0.38f), (n - f * 0.15f).normalized, r * 0.17f, r * Random.Range(0.22f, 0.4f), layer);
+            }
+            else
+            {
+                var tilt = Random.insideUnitSphere * 0.2f;
+                BoneStub(go.transform, surface + right * (r * 0.05f) - f * (r * 0.02f), (n + tilt).normalized, r * 0.2f, r * Random.Range(0.35f, 0.75f), layer);
+            }
+
+            centre = c;
+            radius = r;
+            return go;
+        }
+
+        /// <summary>
+        /// A broken bone end: a 7-sided tube of <paramref name="radius"/> (sides jittered) from below the cut surface up
+        /// to a jagged top 55-100 % of <paramref name="length"/> above it, closed with a recessed (marrow) centre.
+        /// Vertices in <paramref name="parent"/>'s space (the cap's, which is its bone's).
+        /// </summary>
+        internal static GameObject BoneStub(Transform parent, Vector3 at, Vector3 axis, float radius, float length, int layer)
+        {
+            var material = GibMaterial(true);
+            if (material == null || parent == null) return null;
+            const int sides = 7;
+            axis = axis.normalized;
+            var u = Vector3.Cross(axis, Mathf.Abs(axis.y) < 0.9f ? Vector3.up : Vector3.forward).normalized;
+            var v = Vector3.Cross(axis, u);
+            var world = new List<Vector3>(sides * 2 + 1);
+            var uvs = new List<Vector2>(sides * 2 + 1);
+            for (int s = 0; s < sides; s++)
+            {
+                float a = s / (float)sides * Mathf.PI * 2f;
+                var dir = u * Mathf.Cos(a) + v * Mathf.Sin(a);
+                float rr = radius * Random.Range(0.85f, 1.15f);
+                world.Add(at + dir * rr - axis * (length * 0.3f));
+                uvs.Add(new Vector2(s / (float)sides, 0f));
+                world.Add(at + dir * rr * Random.Range(0.8f, 1f) + axis * (length * Random.Range(0.55f, 1f)));
+                uvs.Add(new Vector2(s / (float)sides, 1f));
+            }
+            world.Add(at + axis * (length * 0.45f));
+            uvs.Add(new Vector2(0.5f, 0.5f));
+            int top = world.Count - 1;
+
+            var tris = new List<int>(sides * 9);
+            void Tri(int x, int y, int z, Vector3 facing)
+            {
+                var normal = Vector3.Cross(world[y] - world[x], world[z] - world[x]);
+                tris.Add(x);
+                if (Vector3.Dot(normal, facing) >= 0f)
+                {
+                    tris.Add(y);
+                    tris.Add(z);
+                }
+                else
+                {
+                    tris.Add(z);
+                    tris.Add(y);
+                }
+            }
+            for (int s = 0; s < sides; s++)
+            {
+                int n = (s + 1) % sides;
+                int b0 = s * 2, t0 = s * 2 + 1, b1 = n * 2, t1 = n * 2 + 1;
+                var side = (world[b0] + world[b1]) * 0.5f - at;
+                side = Vector3.ProjectOnPlane(side, axis);
+                Tri(b0, b1, t1, side);
+                Tri(b0, t1, t0, side);
+                Tri(t0, t1, top, axis);
+            }
+
+            var local = new List<Vector3>(world.Count);
+            foreach (var p in world) local.Add(parent.InverseTransformPoint(p));
+            var mesh = new Mesh { name = "RealTargetsBoneStub" };
+            mesh.SetVertices(local);
+            mesh.SetUVs(0, uvs);
+            mesh.SetTriangles(tris, 0);
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+            var go = new GameObject("RealTargetsBoneStub") { layer = layer };
+            go.transform.SetParent(parent, false);
+            go.transform.localPosition = Vector3.zero;
+            go.transform.localRotation = Quaternion.identity;
+            go.transform.localScale = Vector3.one;
+            go.AddComponent<MeshFilter>().sharedMesh = mesh;
+            var r = go.AddComponent<MeshRenderer>();
+            r.sharedMaterial = material;
+            Shade(r);
+            go.AddComponent<OwnedMesh>().Mesh = mesh;
             return go;
         }
 
@@ -254,49 +647,99 @@ namespace RealTargets.Gore
             return mesh;
         }
 
-        /// <summary>Cut surface: dark ragged skin rim, red muscle with fibres, darker vessel holes, a pale bone disc.</summary>
-        private static Texture2D StumpTexture()
+        /// <summary>
+        /// A cross-section through a neck or a limb (1.1.0 gore pass, replaces the 0.10.3 stump texture that read as one red disc from
+        /// a distance). Texture circle = the cut's rim, +y = front. Muscle in bundles split by pale fascia, a ragged fat layer
+        /// and a blood-soaked skin edge at the rim, clots and a blood film breaking up the red; dark, desaturated albedo
+        /// (the lit shader adds the wet highlight). Neck: vertebral body and spinal cord at the back, trachea (cartilage ring,
+        /// black airway) and oesophagus at the front, carotids and jugulars at the sides. Limb: the long bone just off
+        /// centre (cortex, marrow) with its artery, veins and nerve beside it.
+        /// </summary>
+        private static Texture2D CutTexture(StumpKind kind)
         {
-            const int size = 128;
+            const int size = 256;
             var pixels = new Color[size * size];
-            // Albedo for a lit shader (0.10.3, darker than 0.10.2's unlit colours): wet muscle is a deep
-            // red, the bone end is dull and partly covered in blood.
-            var muscle = new Color(0.36f, 0.035f, 0.03f);
-            var dark = new Color(0.12f, 0.005f, 0.005f);
-            var bone = new Color(0.55f, 0.47f, 0.38f);
-            var skin = new Color(0.25f, 0.06f, 0.05f);
+            var muscleA = new Color(0.17f, 0.024f, 0.021f);
+            var muscleB = new Color(0.23f, 0.034f, 0.029f);
+            var clot = new Color(0.05f, 0.007f, 0.007f);
+            var fat = new Color(0.3f, 0.24f, 0.14f);
+            var fascia = new Color(0.24f, 0.16f, 0.14f);
+            var bone = new Color(0.44f, 0.39f, 0.32f);
+            var marrow = new Color(0.2f, 0.045f, 0.03f);
+            var skin = new Color(0.12f, 0.022f, 0.02f);
+            var cartilage = new Color(0.4f, 0.36f, 0.32f);
+            var hole = new Color(0.025f, 0.008f, 0.008f);
+            var vessel = new Color(0.26f, 0.06f, 0.05f);
+            var cord = new Color(0.38f, 0.31f, 0.28f);
+            bool neck = kind == StumpKind.Neck;
+
+            float Disc(float x, float y, float cx, float cy, float sx, float sy) =>
+                Mathf.Sqrt((x - cx) * (x - cx) / (sx * sx) + (y - cy) * (y - cy) / (sy * sy));
+
             for (int j = 0; j < size; j++)
             {
                 for (int i = 0; i < size; i++)
                 {
-                    float x = (i + 0.5f) / size - 0.5f, y = (j + 0.5f) / size - 0.5f;
-                    float r = Mathf.Sqrt(x * x + y * y) * 2f, a = Mathf.Atan2(y, x);
-                    float n = Mathf.PerlinNoise(x * 9f + 3f, y * 9f + 1f);
-                    float fibre = Mathf.PerlinNoise(x * 3f + 7f, y * 40f + 2f);
-                    var c = Color.Lerp(muscle * 0.75f, muscle * 1.15f, fibre) * (0.85f + 0.3f * n);
-                    // Bone slightly off centre (spine at the back of a neck, humerus/femur in a limb).
-                    float bx = x - 0.08f, by = y + 0.02f;
-                    float b = Mathf.Sqrt(bx * bx + by * by) * 2f;
-                    if (b < 0.17f)
+                    float x = (i + 0.5f) / size * 2f - 1f, y = (j + 0.5f) / size * 2f - 1f;
+                    float r = Mathf.Sqrt(x * x + y * y), a = Mathf.Atan2(y, x);
+                    float n = Mathf.PerlinNoise(x * 3f + 3f, y * 3f + 1f);
+                    float m = Mathf.PerlinNoise(x * 7f + 11f, y * 7f + 5f);
+                    float fine = Mathf.PerlinNoise(x * 22f + 2f, y * 22f + 9f);
+
+                    // Muscle bundles cut across: stippled fibres, pale fascia between the bundles.
+                    float wx = x + 0.3f * (n - 0.5f), wy = y + 0.3f * (m - 0.5f);
+                    float cell = Mathf.Abs(Mathf.Sin(wx * 8.5f + Mathf.Sin(wy * 6.5f) * 1.4f)) * Mathf.Abs(Mathf.Sin(wy * 7.5f + Mathf.Sin(wx * 5.5f) * 1.3f));
+                    var c = Color.Lerp(muscleA, muscleB, fine) * (0.82f + 0.3f * n);
+                    if (cell < 0.07f) c = Color.Lerp(c, fascia, 0.55f * (1f - cell / 0.07f));
+
+                    if (neck)
                     {
-                        c = Color.Lerp(bone, bone * 0.7f, b / 0.17f + 0.2f * n);
-                        // Marrow and blood over the cut bone.
-                        float smear = Mathf.PerlinNoise(x * 14f + 5f, y * 14f + 9f);
-                        if (smear > 0.5f) c = Color.Lerp(c, dark * 1.6f, Mathf.InverseLerp(0.5f, 0.68f, smear));
+                        // Vertebral body (spongy bone), spinal canal with the cord, the spinous process behind.
+                        float vb = Disc(x, y, 0f, -0.38f, 0.21f, 0.17f);
+                        if (vb < 1f) c = Color.Lerp(bone, bone * 0.72f, Mathf.PerlinNoise(x * 30f, y * 30f)) * (vb > 0.8f ? 0.85f : 1f);
+                        float canal = Disc(x, y, 0f, -0.62f, 0.09f, 0.075f);
+                        if (canal < 1f) c = canal < 0.7f ? Color.Lerp(cord, cord * 0.75f, fine) : hole * 2f;
+                        float spine = Disc(x, y, 0f, -0.8f, 0.07f, 0.1f);
+                        if (spine < 1f) c = bone * 0.85f;
+                        // Trachea: cartilage ring around a black airway; oesophagus flattened behind it.
+                        float tr = Disc(x, y, 0f, 0.55f, 0.2f, 0.17f);
+                        if (tr < 1f) c = tr < 0.66f ? hole : Color.Lerp(cartilage, cartilage * 0.8f, fine);
+                        float oe = Disc(x, y, 0f, 0.27f, 0.11f, 0.05f);
+                        if (oe < 1f) c = oe < 0.45f ? hole * 2f : new Color(0.3f, 0.08f, 0.07f);
+                        // Carotids (thick walls, open) and jugulars (collapsed), both sides.
+                        for (int side = -1; side <= 1; side += 2)
+                        {
+                            float ca = Disc(x, y, side * 0.42f, 0.24f, 0.065f, 0.065f);
+                            if (ca < 1f) c = ca < 0.55f ? hole * 3f : vessel;
+                            float ju = Disc(x, y, side * 0.56f, 0.13f, 0.09f, 0.055f);
+                            if (ju < 1f) c = hole * 3.5f;
+                        }
                     }
-                    else if (b < 0.22f) c = Color.Lerp(c, dark, 0.6f);
-                    // Vessels and airway: dark holes.
-                    float v1 = Mathf.Sqrt((x + 0.15f) * (x + 0.15f) + (y - 0.12f) * (y - 0.12f)) * 2f;
-                    float v2 = Mathf.Sqrt((x + 0.15f) * (x + 0.15f) + (y + 0.14f) * (y + 0.14f)) * 2f;
-                    float v3 = Mathf.Sqrt((x + 0.28f) * (x + 0.28f) + y * y) * 2f;
-                    if (v1 < 0.07f || v2 < 0.07f) c = dark;
-                    if (v3 < 0.11f) c = dark * 0.5f;
-                    // Ragged skin rim, then transparent.
-                    float rim = 0.86f + 0.08f * Mathf.Sin(a * 9f + 1.1f) + 0.05f * n;
-                    float alpha = 1f;
-                    if (r > rim) c = Color.Lerp(skin, dark, Mathf.InverseLerp(rim, 1f, r));
-                    if (r > 0.97f) alpha = Mathf.Clamp01((1f - r) / 0.03f);
-                    c.a = alpha;
+                    else
+                    {
+                        // Long bone (cortex ring, marrow) just off centre; artery, veins, nerve beside it.
+                        float b = Disc(x, y, 0.05f, -0.03f, 0.23f, 0.21f);
+                        if (b < 1f) c = b < 0.6f ? Color.Lerp(marrow, marrow * 0.6f, fine) : Color.Lerp(bone, bone * 0.75f, Mathf.PerlinNoise(x * 30f, y * 30f));
+                        float art = Disc(x, y, -0.27f, 0.2f, 0.05f, 0.05f);
+                        if (art < 1f) c = art < 0.55f ? hole * 3f : vessel;
+                        float vein = Disc(x, y, -0.36f, 0.12f, 0.065f, 0.045f);
+                        if (vein < 1f) c = hole * 3.5f;
+                        float nerve = Disc(x, y, -0.2f, 0.3f, 0.035f, 0.035f);
+                        if (nerve < 1f) c = cord * 0.9f;
+                    }
+
+                    // Fat under a ragged skin edge at the rim.
+                    float rim = 0.95f - 0.035f * Mathf.PerlinNoise(Mathf.Cos(a) * 3f + 7f, Mathf.Sin(a) * 3f + 7f);
+                    if (r > rim - 0.08f) c = Color.Lerp(c, fat * (0.8f + 0.3f * fine), 0.8f);
+                    if (r > rim) c = skin * (0.85f + 0.3f * n);
+
+                    // Clots and a film of blood over the whole surface: no clean paint-red anywhere.
+                    float blood = Mathf.PerlinNoise(x * 2.6f + 40f, y * 2.6f + 40f);
+                    float blot = Mathf.PerlinNoise(x * 9f + 60f, y * 9f + 20f);
+                    if (blood > 0.5f) c = Color.Lerp(c, clot, Mathf.InverseLerp(0.5f, 0.68f, blood) * 0.9f);
+                    if (blot > 0.68f) c = Color.Lerp(c, clot, 0.7f);
+                    c = Color.Lerp(c, muscleA * 0.7f, 0.18f);
+                    c.a = 1f;
                     pixels[j * size + i] = c;
                 }
             }
@@ -313,7 +756,7 @@ namespace RealTargets.Gore
             var pixels = new Color[size * size];
             var flesh = new Color(0.33f, 0.03f, 0.025f);
             var clot = new Color(0.12f, 0.005f, 0.005f);
-            var boneCol = new Color(0.52f, 0.45f, 0.37f);
+            var boneCol = new Color(0.42f, 0.37f, 0.3f);
             for (int j = 0; j < size; j++)
             {
                 for (int i = 0; i < size; i++)
@@ -422,7 +865,7 @@ namespace RealTargets.Gore
         }
 
         /// <summary>LOD0 skinned meshes of a player (lower LODs are enabled renderers too; the LODGroup only hides them).</summary>
-        internal static List<SkinnedMeshRenderer> Lod0Skins(Player player)
+        internal static List<SkinnedMeshRenderer> Lod0Skins(Component player)
         {
             var low = new HashSet<Renderer>();
             foreach (var group in player.GetComponentsInChildren<LODGroup>())
@@ -505,6 +948,8 @@ namespace RealTargets.Gore
         private bool _splatted, _frozen, _reportedStuck;
         private Vector3 _start;
         internal bool Bloody = true;
+        // Gore-only mode (Visuals > Enabled off): the piece flies, but leaves no blood marks.
+        private bool Marks => Bloody && Plugin.VisualsEnabled.Value;
         internal string Label;
 
         // Wet tissue sticks to walls and ceilings (0.10.6, Stompa): stuck for a few seconds, sliding down and
@@ -562,9 +1007,74 @@ namespace RealTargets.Gore
             return _cached;
         }
 
+        // A severed limb keeps bleeding out of its cut end (gore retest, Stompa 2026-10-18: "it should bleed and pool a
+        // little after landing"): a thin trail of drops in flight, then once it lies still it drains what the limb holds
+        // (half-life 10 s, slower with the cut facing up) into a small pool under the cut end, with drops falling into it.
+        private bool _bleeds;
+        private Vector3 _cutLocal, _cutOutwardLocal;
+        private float _bloodMl, _drainedMl, _nextDrop, _nextPool;
+        private const float DrainHalfLife = 10f;
+
+        /// <summary>Makes this piece bleed from its cut end (local to the piece) with <paramref name="ml"/> to lose.</summary>
+        internal void BleedFromCut(Vector3 localPoint, Vector3 localOutward, float ml)
+        {
+            _bleeds = ml > 0f;
+            _cutLocal = localPoint;
+            _cutOutwardLocal = localOutward.normalized;
+            _bloodMl = ml;
+        }
+
+        private void Bleed()
+        {
+            if (!_bleeds || !Marks || !Plugin.VisualsDrips.Value) return;
+            float now = Time.time;
+            if (now < _nextDrop) return;
+            var cut = transform.TransformPoint(_cutLocal);
+            var outward = transform.TransformDirection(_cutOutwardLocal);
+            var blood = BloodParticles.Instance;
+
+            if (!_frozen)
+            {
+                // In flight: a short trail while the cut still pours (first 1.5 s), nothing after.
+                if (now - _since > 1.5f || _landedAt >= 0f) return;
+                _nextDrop = now + 0.07f;
+                var v = _body != null ? _body.velocity * 0.6f : Vector3.zero;
+                blood?.Emit(cut + outward * 0.01f, v + outward * 1.2f, 25f, 2, 0.01f);
+                return;
+            }
+
+            // Lying still: drain by gravity. A cut facing down pours, one facing up only seeps over its rim.
+            float left = _bloodMl - _drainedMl;
+            if (left < Mathf.Max(1f, _bloodMl * 0.05f))
+            {
+                _bleeds = false;
+                if (!string.IsNullOrEmpty(Label) && Plugin.LogBlood.Value)
+                {
+                    Plugin.Log.LogInfo($"[Gore] {Label}: piece drained {_drainedMl:F0} ml from its cut end");
+                }
+                return;
+            }
+            const float step = 0.25f;
+            _nextDrop = now + step * Random.Range(0.7f, 1.3f);
+            float dependent = Mathf.Clamp(0.4f - 0.6f * outward.y, 0.15f, 1f);
+            float ml = Mathf.Min(left, left * (1f - Mathf.Pow(0.5f, step / DrainHalfLife)) * (dependent / 0.7f));
+            _drainedMl += ml;
+            int count = ml > 2f ? 2 : 1;
+            blood?.Emit(cut + outward * 0.015f, outward * 0.12f + Random.insideUnitSphere * 0.04f, 0f, count, ml > 2f ? 0.012f : 0.009f);
+
+            // The pool: the drained volume as a ~2.5 mm film (as the body's pools), under the cut end.
+            if (Plugin.VisualsPools.Value && now >= _nextPool)
+            {
+                _nextPool = now + 0.4f;
+                float radius = Mathf.Sqrt(_drainedMl * 1e-6f / (Mathf.PI * 0.0025f));
+                if (radius >= 0.03f) GroundBlood.Instance?.Pool(this, Label ?? "piece", cut + outward * 0.03f, radius);
+            }
+        }
+
         private void Update()
         {
             using var perf = RealTargets.Diagnostics.Perf.Measure(RealTargets.Diagnostics.PerfArea.Gore);
+            Bleed();
             if (_frozen || _body == null) return;
             if (_stuck)
             {
@@ -639,7 +1149,7 @@ namespace RealTargets.Gore
                 // 0.10.14: never on a door or window (it would hang in the air once that opens or breaks).
                 if ((wall || ceiling) && Random.value < StickChance && !GroundBlood.Movable(collision.collider)) StickNow(contact.point, contact.normal);
             }
-            if (_splatted || !Bloody) return;
+            if (_splatted || !Marks) return;
             _splatted = true;
             var c = collision.GetContact(0);
             // The contact is on the physics collider, which may sit off the visible surface: put the
@@ -673,7 +1183,7 @@ namespace RealTargets.Gore
             _body.isKinematic = true;
             transform.position = point + _stuckNormal * Radius() * 0.5f;
             _lastSmear = point;
-            if (Bloody) GroundBlood.Instance?.Splat(point, _stuckNormal, Vector3.zero);
+            if (Marks) GroundBlood.Instance?.Splat(point, _stuckNormal, Vector3.zero);
         }
 
         private float Radius() => Mathf.Max(0.005f, transform.lossyScale.x * 0.45f);
@@ -690,7 +1200,7 @@ namespace RealTargets.Gore
                     _stuckNormal = hit.normal;
                     _slideDir = Vector3.ProjectOnPlane(Vector3.down, _stuckNormal).normalized;
                     transform.position = hit.point + _stuckNormal * Radius() * 0.5f;
-                    if (Bloody && _smears < MaxSmears && (hit.point - _lastSmear).sqrMagnitude > 0.02f * 0.02f)
+                    if (Marks && _smears < MaxSmears && (hit.point - _lastSmear).sqrMagnitude > 0.02f * 0.02f)
                     {
                         _smears++;
                         _lastSmear = hit.point;

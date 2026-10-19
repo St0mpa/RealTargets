@@ -1,4 +1,5 @@
 using EFT;
+using RealTargets.Compat;
 using RealTargets.Hits;
 using UnityEngine;
 
@@ -16,6 +17,7 @@ namespace RealTargets.Gore
     ///   so it shows even when the droplet budget is spent;
     /// - corpse squeeze: a hit on a dead body pushes a little blood out of the hole (cavity), no jet.
     /// EFT's own entry puff stays; we don't add one at the entry.
+    /// With HollywoodFX and [HollywoodFX] Prefer its blood (1.1.0), some of these give way to its blood (Compat/HollywoodFx).
     /// </summary>
     internal sealed class ImpactBlood : MonoBehaviour
     {
@@ -40,7 +42,9 @@ namespace RealTargets.Gore
 
             try
             {
-                if (WoundPath.Resolve(hit, out var path)) Throw(hit, path);
+                // Every stretch through flesh (forearm, then chest): its own exit blood; the wall only behind the last.
+                WoundPath.ResolveAll(hit, Paths);
+                for (int i = 0; i < Paths.Count; i++) Throw(hit, Paths[i], i == Paths.Count - 1);
             }
             catch (System.Exception ex)
             {
@@ -48,7 +52,9 @@ namespace RealTargets.Gore
             }
         }
 
-        private static void Throw(HitEvent hit, WoundPath path)
+        private static readonly System.Collections.Generic.List<WoundPath> Paths = new System.Collections.Generic.List<WoundPath>(2);
+
+        private static void Throw(HitEvent hit, WoundPath path, bool last)
         {
             var blood = BloodParticles.Instance;
             float e = path.Energy;
@@ -56,11 +62,15 @@ namespace RealTargets.Gore
             bool head = WoundPath.IsHead(path.Entry.Collider);
             bool corpse = hit.Status == HitStatus.Corpse;
             bool bigHead = head && hit.Status != HitStatus.Alive && e > 1200f;
+            // [HollywoodFX] Prefer its blood: its puffs/sprays sit at the entry, EFT's splash on the wall behind.
+            // A stretch that goes on from inside (the same round's earlier-frame hit) has no entry to mist from.
+            bool skipEntry = HollywoodFx.SkipEntryMist || path.FromInside;
+            bool skipExit = HollywoodFx.SkipExitBlood;
 
             if (path.Exited)
             {
                 var dir = path.Direction;
-                if (blood != null && Plugin.VisualsExitSpray.Value)
+                if (blood != null && Plugin.VisualsExitSpray.Value && !skipExit)
                 {
                     int count = Mathf.RoundToInt(Mathf.Clamp(e / 70f, 3f, 45f) * (bigHead ? 1.6f : 1f));
                     float speed = Mathf.Lerp(2.5f, 9f, power);
@@ -69,7 +79,7 @@ namespace RealTargets.Gore
                     blood.Emit(path.End + dir * 0.01f, dir * speed * 0.3f, 30f, Mathf.Max(2, count / 4), 0.011f);
                 }
 
-                if (e > 250f)
+                if (e > 250f && !skipExit)
                 {
                     // 0.10.1: 0.10.0's 3-12 cm puffs were never seen (Stompa).
                     float size = Mathf.Lerp(0.08f, 0.22f, power) * (bigHead ? 1.6f : 1f);
@@ -77,22 +87,22 @@ namespace RealTargets.Gore
                     BloodMist.Instance?.Puff(path.End + dir * 0.04f, dir, size, Mathf.Lerp(0.55f, 0.9f, power), puffs);
                 }
 
-                if (Plugin.VisualsSpatter.Value && e > 400f) Spatter(path, e, bigHead);
+                if (last && Plugin.VisualsSpatter.Value && e > 400f && !HollywoodFx.SkipWallSpatter) Spatter(path, e, bigHead);
             }
-            else if (head && e > 800f)
+            else if (head && e > 800f && !skipEntry)
             {
                 // Stopped inside the skull: the pressure vents back out of the entry.
                 BloodMist.Instance?.Puff(path.Start - path.Direction * 0.03f, -path.Direction, 0.08f, 0.6f, 6);
             }
 
             // Backspatter toward the shooter: the part of the cloud you actually see from the front.
-            if (e > 300f)
+            if (e > 300f && !skipEntry)
             {
                 BloodMist.Instance?.Puff(path.Start - path.Direction * 0.03f, -path.Direction, Mathf.Lerp(0.05f, 0.12f, power), 0.5f,
                     Mathf.RoundToInt(Mathf.Lerp(3f, 8f, power)));
             }
 
-            if (corpse && blood != null && Plugin.VisualsDrips.Value)
+            if (corpse && blood != null && Plugin.VisualsDrips.Value && !skipExit)
             {
                 var at = path.Exited ? path.End : path.Start;
                 var outward = path.Exited ? path.Direction : -path.Direction;

@@ -84,6 +84,8 @@ namespace RealTargets.Gore
 
         // ---- Hits -> sites -----------------------------------------------------------------------
 
+        private static readonly List<WoundPath> Paths = new List<WoundPath>(2);
+
         private void OnHit(HitEvent hit)
         {
             if (!Plugin.VisualsEnabled.Value || hit.Target == null || hit.IsLocalPlayer || !hit.IsAI)
@@ -93,11 +95,17 @@ namespace RealTargets.Gore
 
             try
             {
-                if (!WoundPath.Resolve(hit, out var path)) return;
+                // A site per stretch through flesh (a round through a forearm into the chest bleeds from both);
+                // a stretch that goes on from inside adds none (its body part already bleeds from the earlier hit).
+                WoundPath.ResolveAll(hit, Paths);
+                if (Paths.Count == 0) return;
                 var bleeder = GetOrCreate(hit.Target, hit.Status == HitStatus.Corpse);
                 bleeder.Hits++;
                 if (hit.Status == HitStatus.Killed) bleeder.KillingHit = hit;
-                AddSite(bleeder, hit, path);
+                foreach (var path in Paths)
+                {
+                    if (!path.FromInside) AddSite(bleeder, hit, path);
+                }
             }
             catch (System.Exception ex)
             {

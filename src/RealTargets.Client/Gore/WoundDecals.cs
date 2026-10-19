@@ -29,7 +29,7 @@ namespace RealTargets.Gore
     /// 0.10.10: a body's patches of one kind (entry, exit, stain) share ONE skinned renderer (PatchBatch)
     /// instead of one renderer each; same skinning per vertex, so they still move and collapse with the body.
     /// </summary>
-    internal enum PatchKind { Entry, Exit, Stain }
+    internal enum PatchKind { Entry, Exit, Stain, Puncture }
 
     internal sealed class WoundDecals : MonoBehaviour
     {
@@ -158,6 +158,8 @@ namespace RealTargets.Gore
         private Material _entry, _exit, _entryColour, _exitColour, _stain, _stainColour;
         // Lit colour pass (0.10.3, `Decal shader = Lit`): the map's light decides the brightness.
         private Material _entryLit, _exitLit, _stainLit;
+        // Fabric/gear puncture (1.1.0 retest 4): multiply, colour and lit passes like the others.
+        private Material _punct, _punctColour, _punctLit;
         private Mesh _quad;
         private int[] _gridTriangles;
         private Vector2[] _gridUvs;
@@ -265,7 +267,7 @@ namespace RealTargets.Gore
             }
             var entry = hit.Segments[first];
             // Soft armour or a helmet stopped it: no hole in the body.
-            if (entry.DamageIn > 0.01f && entry.DamageOut / entry.DamageIn < Plugin.ArmourStopFraction.Value)
+            if (entry.StoppedByArmour(Plugin.ArmourStopFraction.Value))
             {
                 Debug(hit, $"none: armour stopped it ({entry.DamageOut:F0}/{entry.DamageIn:F0} dmg through)");
                 return;
@@ -278,7 +280,6 @@ namespace RealTargets.Gore
                 Debug(hit, $"none: no collider {entry.Collider}");
                 return;
             }
-            var bone = bpc.TransformCached;
 
             EnsureResources();
             if (_entry == null && _entryColour == null)
@@ -286,60 +287,242 @@ namespace RealTargets.Gore
                 Debug(hit, "no shader");
                 return;
             }
-            var dir = entry.Direction.sqrMagnitude > 0.5f ? entry.Direction.normalized : hit.Direction.normalized;
             float hole = HoleDiameter(hit);
-
-            // Entry: from outside along the shot.
+            var watch = System.Diagnostics.Stopwatch.StartNew();
             var baked = Bake(player);
-            if (Surface(baked, entry.Point - dir * 0.3f, dir, 0.6f, -1, out var at))
+            double bakeMs = watch.Elapsed.TotalMilliseconds;
+
+            // A hole in and out for every stretch through flesh: a round through a forearm into the chest also
+            // goes into the chest (1.1.0 test: only the forearm got holes). WoundPath decides the stretches, so
+            // the bleeding and these holes always match.
+            WoundPath.ResolveAll(hit, Paths);
+            foreach (var path in Paths)
             {
-                if (SpawnSkinned(player, baked, at, hole / (2f * 0.18f), PatchKind.Entry, null))
+                PlaceLeg(hit, player, baked, colliders, path, hole);
+            }
+            // Retest 4: the raid's first hit took 17 ms here, later ones under 5: say where it goes.
+            double total = watch.Elapsed.TotalMilliseconds;
+            if (total > 8.0)
+            {
+                Plugin.Log.LogInfo($"[Perf] wound decals {total:F1} ms: bake {bakeMs:F1} ms (frame of the bake, cached later), " +
+                                   $"surfaces and patches {total - bakeMs:F1} ms, {Paths.Count} stretch(es)");
+            }
+        }
+
+        private static readonly List<WoundPath> Paths = new List<WoundPath>(2);
+
+        private void PlaceLeg(HitEvent hit, Player player, Baked baked, IReadOnlyDictionary<EBodyPartColliderType, BodyPartCollider> colliders,
+            WoundPath path, float hole)
+        {
+            string leg = path.Leg > 0 ? $"leg {path.Leg + 1} ({path.Entry.Collider}): " : string.Empty;
+            if (!colliders.TryGetValue(path.Entry.Collider, out var bpc) || bpc == null)
+            {
+                Debug(hit, $"{leg}none: no collider {path.Entry.Collider}");
+                return;
+            }
+            var bone = bpc.TransformCached;
+            var dir = path.Direction;
+            SurfaceHit at;
+
+            // Entry: from outside along the shot (none where it goes on from inside the body).
+            if (path.FromInside)
+            {
+                Debug(hit, $"{leg}no entry: goes on from inside (same round, earlier frame)");
+            }
+            else if (Surface(baked, path.Start - dir * 0.3f, dir, 0.6f, -1, out at) || SurfaceTowardBone(baked, path.Start, bone, out at))
+            {
+                var look = EntryLookOf(hit, path.Entry, baked, at, out string surface);
+                if (look == EntryLook.LeftToGame)
                 {
-                    Debug(hit, $"entry skinned on {baked.Parts[at.Part].Source.name}");
+                    Debug(hit, $"{leg}entry left to the game's hole decal on {surface}");
                 }
                 else
                 {
-                    Spawn(player, bone, at.Point, at.Normal, hole / (2f * 0.18f), PatchKind.Entry);
-                    Debug(hit, $"entry flat on {bone.name} (no bone weights)");
+                    var kind = look == EntryLook.Skin ? PatchKind.Entry : PatchKind.Puncture;
+                    float size = look == EntryLook.Skin ? hole / (2f * 0.18f) : hole / (2f * 0.16f);
+                    if (SpawnSkinned(player, baked, at, size, kind, null))
+                    {
+                        Debug(hit, $"{leg}entry ({look}) skinned on {surface}");
+                    }
+                    else
+                    {
+                        Spawn(player, bone, at.Point, at.Normal, size, kind);
+                        Debug(hit, $"{leg}entry ({look}) flat on {bone.name} (no bone weights)");
+                    }
                 }
+            }
+            else if (path.Entry.Armour.Any && GamePaintsHole(hit))
+            {
+                Debug(hit, $"{leg}entry left to the game's hole decal on {path.Entry.Armour.Name} (no surface found along the shot)");
             }
             else
             {
-                Spawn(player, bone, entry.Point, -dir, hole / (2f * 0.18f), PatchKind.Entry);
-                Debug(hit, $"entry flat on {bone.name} (no surface found along the shot)");
+                // rc-1 test: a flat patch at the collider point floated off the leg ("entry wound decals floating in air";
+                // the capsule is fatter than the mesh). No surface along the shot or toward the bone: no patch.
+                Debug(hit, $"{leg}no entry patch: no surface along the shot or toward {bone.name}");
             }
 
-            // Exit: the farthest flesh exit in line with the shot, seen from the far side.
-            Vector3? exitPoint = null;
-            float best = 0f;
-            foreach (var e in hit.Exits)
-            {
-                if (e.plate) continue;
-                float along = Vector3.Dot(e.point - entry.Point, dir);
-                if (along > best && along < 0.8f)
-                {
-                    best = along;
-                    exitPoint = e.point;
-                }
-            }
-            if (exitPoint == null) return;
-
-            float energy = hit.ImpactEnergy > 0f ? hit.EffectiveEnergy : 500f;
+            // Exit: seen from the far side.
+            if (!path.Exited) return;
+            float energy = hit.ImpactEnergy > 0f ? path.Energy : 500f;
             float cavity = Mathf.Clamp(0.008f + Plugin.CavityScale.Value * 0.0005f * Mathf.Sqrt(energy), 0.008f, 0.06f);
             float exitSize = Mathf.Max(hole * 1.5f, cavity * 1.1f);
-            if (colliders.TryGetValue(ExitCollider(hit, exitPoint.Value), out var exitBpc) && exitBpc != null) bone = exitBpc.TransformCached;
-            if (Surface(baked, exitPoint.Value + dir * 0.3f, -dir, 0.6f, -1, out at))
+            if (colliders.TryGetValue(path.ExitCollider, out var exitBpc) && exitBpc != null) bone = exitBpc.TransformCached;
+            if (Surface(baked, path.End + dir * 0.3f, -dir, 0.6f, -1, out at) || SurfaceTowardBone(baked, path.End, bone, out at))
             {
                 if (!SpawnSkinned(player, baked, at, exitSize / (2f * 0.30f), PatchKind.Exit, null))
                 {
                     Spawn(player, bone, at.Point, at.Normal, exitSize / (2f * 0.30f), PatchKind.Exit);
                 }
+                Debug(hit, $"{leg}exit placed{(InferredExit(hit, path.Leg) ? " (inferred)" : "")}");
             }
             else
             {
-                Spawn(player, bone, exitPoint.Value, dir, exitSize / (2f * 0.30f), PatchKind.Exit);
+                Debug(hit, $"{leg}no exit patch: no surface along the shot or toward {bone.name}");
             }
-            Debug(hit, "exit placed");
+        }
+
+        /// <summary>
+        /// The body's surface nearest a collider point when the shot's own ray met none (rc-1: corpse calves): a ray from
+        /// just outside the point toward the bone, so the patch lands on the cloth instead of floating on the capsule.
+        /// </summary>
+        private static bool SurfaceTowardBone(Baked baked, Vector3 point, Transform bone, out SurfaceHit at)
+        {
+            at = default;
+            if (bone == null) return false;
+            var inward = bone.position - point;
+            float depth = inward.magnitude;
+            if (depth < 0.005f) return false;
+            inward /= depth;
+            return Surface(baked, point - inward * 0.05f, inward, depth + 0.05f, -1, out at);
+        }
+
+        private static bool InferredExit(HitEvent hit, int leg) => leg < hit.Legs.Count && hit.Legs[leg].InferredExit;
+
+        private enum EntryLook { Skin, Cloth, Gear, LeftToGame }
+
+        /// <summary>
+        /// What the entry goes into (1.1.0 gore retest 4, Stompa: "we show the same bloody hole no matter where we hit";
+        /// HollywoodFX's black holes on a vest "look better as they are different when you hit armour"):
+        /// skin gets our wound; clothing a dark fabric puncture (the blood comes from the bleeding's stains); worn armour
+        /// or gear gets nothing where EFT already paints its hole (a living bot, or a corpse with HollywoodFX's body
+        /// decals), else the puncture. Skin = a head/hand/body mesh that isn't worn gear, or a skin material (see SurfaceOf).
+        /// </summary>
+        private static EntryLook EntryLookOf(HitEvent hit, HitSegment segment, Baked baked, SurfaceHit at, out string surface)
+        {
+            var part = baked.Parts[at.Part];
+            string mesh = part.Source != null ? part.Source.name : "?";
+            string material = MaterialAt(part, at.Triangle);
+            surface = $"{mesh} [{material}]";
+            // Worn armour over this collider: the round went in through it, whatever the ray met first.
+            if (segment.Armour.Any) return GamePaintsHole(hit) ? EntryLook.LeftToGame : EntryLook.Gear;
+            switch (SurfaceOf(mesh, material))
+            {
+                case SurfaceKind.Skin: return EntryLook.Skin;
+                case SurfaceKind.Gear: return GamePaintsHole(hit) ? EntryLook.LeftToGame : EntryLook.Gear;
+                default: return EntryLook.Cloth;
+            }
+        }
+
+        /// <summary>
+        /// The entry's patch kind on a body nothing else paints (the death screen's preview): skin = wound, anything else
+        /// (cloth, armour, gear) = puncture. Same name rules as <see cref="EntryLookOf"/>.
+        /// </summary>
+        internal static PatchKind EntryKindFor(string mesh, string material, bool armour)
+        {
+            if (armour) return PatchKind.Puncture;
+            return SurfaceOf(mesh, material) == SurfaceKind.Skin ? PatchKind.Entry : PatchKind.Puncture;
+        }
+
+        private enum SurfaceKind { Skin, Cloth, Gear }
+
+        /// <summary>What a body mesh is, from its name and the hit triangle's material.</summary>
+        private static SurfaceKind SurfaceOf(string mesh, string material)
+        {
+            // Suits (tops, trousers, shirts) are never gear by name (rc-1: `Top_wild_vest2` read as gear and bare
+            // forearms got no hole); skin only by a skin material, which scav tops don't have (see SkinMaterialWords).
+            if (ClothingMesh(mesh)) return HasWord(material, SkinMaterialWords) ? SurfaceKind.Skin : SurfaceKind.Cloth;
+            // Worn items before the skin words (release check 3: chest rigs `CR_blackRock_body`, backpacks
+            // `BP_WarTech_Body` and a balaclava with material `item_equipment_facecover_...` drew red skin wounds through
+            // "body" and "face"; a "headset" has "head").
+            if (GearItem(mesh, material)) return SurfaceKind.Gear;
+            if (HasWord(mesh, SkinMeshWords) || HasWord(material, SkinMaterialWords)) return SurfaceKind.Skin;
+            return SurfaceKind.Cloth;
+        }
+
+        private static bool GearItem(string mesh, string material) =>
+            GearName(mesh) || GearName(material) ||
+            mesh.StartsWith("BP_", System.StringComparison.OrdinalIgnoreCase) ||
+            mesh.StartsWith("CR_", System.StringComparison.OrdinalIgnoreCase) ||
+            (material != null && material.StartsWith("item_equipment", System.StringComparison.OrdinalIgnoreCase));
+
+        /// <summary>Materials for a patch drawn outside this class (the death screen), resources made on first use.</summary>
+        internal Material[] MaterialsFor(PatchKind kind)
+        {
+            EnsureResources();
+            return Materials(kind);
+        }
+
+        private static bool ClothingMesh(string mesh) =>
+            mesh.StartsWith("Top_", System.StringComparison.OrdinalIgnoreCase) ||
+            mesh.StartsWith("Pants_", System.StringComparison.OrdinalIgnoreCase) ||
+            mesh.StartsWith("Tshirt_", System.StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>EFT paints its texture hole decal on living bots; on corpses only with HollywoodFX's body decals.</summary>
+        private static bool GamePaintsHole(HitEvent hit) =>
+            hit.Status != HitStatus.Corpse || RealTargets.Compat.HollywoodFx.PaintsCorpseWounds;
+
+        private static readonly string[] GearWords = { "armor", "armour", "helmet", "rig_", "_rig", "vest", "plate", "backpack", "bag", "mask", "goggles", "visor", "headset", "pouch", "razgruz" };
+        // Mesh names: EFT bodies are <side>_head_*, *_hands_*, *_body_*. Materials: a suit's cloth is named after its mesh
+        // (`Top_usec_Tier2`, `pants_usec_UrbanResponder`). No "body" for materials (release check 2): a scav top is ONE
+        // material `Wild_Body_N` for cloth and bare arms alike, so "body" made every raincoat torso hit a skin wound.
+        // Such tops get the cloth puncture everywhere; one material can't tell bare arms from cloth.
+        private static readonly string[] SkinMeshWords = { "head", "hand", "body" };
+        private static readonly string[] SkinMaterialWords = { "skin", "head", "hand", "face", "neck" };
+
+        private static bool GearName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            if (name.StartsWith("AR_", System.StringComparison.OrdinalIgnoreCase)) return true;
+            foreach (var w in GearWords)
+            {
+                if (name.IndexOf(w, System.StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            }
+            return false;
+        }
+
+        private static bool HasWord(string name, string[] words)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            foreach (var w in words)
+            {
+                if (name.IndexOf(w, System.StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            }
+            return false;
+        }
+
+        /// <summary>The material of the submesh the hit triangle belongs to (baked meshes keep the source's submesh order).</summary>
+        private static string MaterialAt(BakedPart part, int triangle)
+        {
+            try
+            {
+                var materials = part.Source != null ? part.Source.sharedMaterials : null;
+                if (materials == null || materials.Length == 0 || part.Mesh == null) return "?";
+                int sub = 0, first = 0;
+                for (int s = 0; s < part.Mesh.subMeshCount; s++)
+                {
+                    int count = (int)part.Mesh.GetIndexCount(s) / 3;
+                    if (triangle < first + count) { sub = s; break; }
+                    first += count;
+                    sub = s;
+                }
+                var m = materials[Mathf.Min(sub, materials.Length - 1)];
+                return m != null ? m.name : "?";
+            }
+            catch
+            {
+                return "?";
+            }
         }
 
         private static EBodyPartColliderType ExitCollider(HitEvent hit, Vector3 point)
@@ -352,7 +535,7 @@ namespace RealTargets.Gore
         }
 
         /// <summary>Entry hole diameter (m) from the calibre: bullet + abrasion collar.</summary>
-        private static float HoleDiameter(HitEvent hit)
+        internal static float HoleDiameter(HitEvent hit)
         {
             if (hit.IsFragment) return Random.Range(0.006f, 0.014f);
             if (hit.ProjectileCount > 1) return 0.008f;
@@ -552,9 +735,12 @@ namespace RealTargets.Gore
             baked.Pending.RemoveAt(index);
             var watch = System.Diagnostics.Stopwatch.StartNew();
             var mesh = new Mesh();
+            // BakeMesh(true) is fully local (scale divided out): the collider takes the skin's whole transform, scale too
+            // (release check 5: a BEAR Tiger T-shirt at scale 0.1 baked 10x and wounds on it landed off the shirt).
             smr.BakeMesh(mesh, true);
             var go = new GameObject(Prefix + "Bake") { hideFlags = HideFlags.HideAndDontSave };
             go.transform.SetPositionAndRotation(smr.transform.position, smr.transform.rotation);
+            go.transform.localScale = smr.transform.lossyScale;
             var collider = go.AddComponent<MeshCollider>();
             collider.sharedMesh = mesh;
             double ms = watch.Elapsed.TotalMilliseconds;
@@ -987,9 +1173,9 @@ namespace RealTargets.Gore
         /// <summary>The patch's materials for the current `Decal shader` mode (falls back to what exists).</summary>
         private Material[] Materials(PatchKind kind)
         {
-            var mul = kind == PatchKind.Exit ? _exit : kind == PatchKind.Stain ? _stain : _entry;
-            var col = kind == PatchKind.Exit ? _exitColour : kind == PatchKind.Stain ? _stainColour : _entryColour;
-            var lit = kind == PatchKind.Exit ? _exitLit : kind == PatchKind.Stain ? _stainLit : _entryLit;
+            var mul = kind == PatchKind.Exit ? _exit : kind == PatchKind.Stain ? _stain : kind == PatchKind.Puncture ? _punct : _entry;
+            var col = kind == PatchKind.Exit ? _exitColour : kind == PatchKind.Stain ? _stainColour : kind == PatchKind.Puncture ? _punctColour : _entryColour;
+            var lit = kind == PatchKind.Exit ? _exitLit : kind == PatchKind.Stain ? _stainLit : kind == PatchKind.Puncture ? _punctLit : _entryLit;
             switch (Plugin.DecalShader.Value)
             {
                 case DecalShaderMode.Lit when lit != null:
@@ -1068,7 +1254,7 @@ namespace RealTargets.Gore
             }
             if (cleared > 0 && Plugin.LogWounds.Value)
             {
-                Plugin.Log.LogInfo($"[Wound] {player.Profile?.Nickname}: {cleared} patch(es) removed over the skull burst");
+                Plugin.Log.LogInfo($"[Wound] {player.Profile?.Nickname}: {cleared} patch(es) removed over a skull burst or a removed part");
             }
             return cleared;
         }
@@ -1128,6 +1314,25 @@ namespace RealTargets.Gore
         /// <summary>Builds the wound textures and materials while the raid loads (0.10.10).</summary>
         internal void Warm() => EnsureResources();
 
+        /// <summary>
+        /// Bakes, cooks and ray-casts a real body once (your own, at spawn), then throws it away: rc-1 test, the raid's
+        /// first hit spent 15.3 ms in "surfaces and patches" baking and cooking a body's skins on demand, later bodies far
+        /// less, and warming a 12-triangle box at load changed nothing. Returns the ms it took.
+        /// </summary>
+        internal double WarmBody(Player player)
+        {
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            if (player == null) return 0;
+            EnsureResources();
+            var baked = Bake(player);
+            while (baked.Pending.Count > 0) BakePending(baked, baked.Pending.Count - 1);
+            var top = player.Position + Vector3.up * 2.5f;
+            Surface(baked, top, Vector3.down, 3f, -1, out _, bake: false);
+            _baked.Remove(player.Id);
+            DestroyBake(baked);
+            return watch.Elapsed.TotalMilliseconds;
+        }
+
         private void EnsureResources()
         {
             if (_quad != null) return;
@@ -1170,8 +1375,11 @@ namespace RealTargets.Gore
             var entryTex = WoundTextures.Entry();
             var exitTex = WoundTextures.Exit();
             var stainTex = WoundTextures.Stain();
+            var punctTex = WoundTextures.Puncture();
             if (multiply != null && multiplyName.Contains("Multiply"))
             {
+                _punct = new Material(multiply) { mainTexture = punctTex, hideFlags = HideFlags.HideAndDontSave };
+                GroundBlood.NoSoftFade(_punct);
                 _entry = new Material(multiply) { mainTexture = entryTex, hideFlags = HideFlags.HideAndDontSave };
                 _exit = new Material(multiply) { mainTexture = exitTex, hideFlags = HideFlags.HideAndDontSave };
                 _stain = new Material(multiply) { mainTexture = stainTex, hideFlags = HideFlags.HideAndDontSave };
@@ -1183,6 +1391,9 @@ namespace RealTargets.Gore
             }
             if (blended != null && blendedName.Contains("Alpha Blended"))
             {
+                _punctColour = new Material(blended) { mainTexture = punctTex, hideFlags = HideFlags.HideAndDontSave };
+                GroundBlood.NoSoftFade(_punctColour);
+                _punctColour.renderQueue = 3001;
                 _entryColour = new Material(blended) { mainTexture = entryTex, hideFlags = HideFlags.HideAndDontSave };
                 _exitColour = new Material(blended) { mainTexture = exitTex, hideFlags = HideFlags.HideAndDontSave };
                 _stainColour = new Material(blended) { mainTexture = stainTex, hideFlags = HideFlags.HideAndDontSave };
@@ -1196,6 +1407,8 @@ namespace RealTargets.Gore
             }
             // Lit colour pass: same textures as albedo, glossy (wet); stains under the holes.
             _entryLit = LitBlood.Transparent(entryTex, new Color(1f, 1f, 1f, 0.9f), 0.7f, 3001, "RealTargetsWoundEntryLit");
+            // Less gloss than a wound: torn fabric, only its soaked ring is wet.
+            _punctLit = LitBlood.Transparent(punctTex, new Color(1f, 1f, 1f, 0.9f), 0.35f, 3001, "RealTargetsWoundPunctureLit");
             _exitLit = LitBlood.Transparent(exitTex, new Color(1f, 1f, 1f, 0.9f), 0.7f, 3001, "RealTargetsWoundExitLit");
             _stainLit = LitBlood.Transparent(stainTex, new Color(1f, 1f, 1f, 0.85f), 0.5f, 2996, "RealTargetsWoundStainLit", 0.3f);
             ShaderName = $"{(_entry != null ? multiplyName : "-")} + {(_entryColour != null ? blendedName : "-")} + lit {LitBlood.TransparentName}";
@@ -1278,6 +1491,28 @@ namespace RealTargets.Gore
                 if (r < hole + 0.07f) return new Color(0.36f, 0.09f, 0.06f, 1f) * (0.85f + 0.3f * n);
                 float halo = 1f - Mathf.InverseLerp(hole + 0.07f, 0.5f + 0.08f * n, r);
                 return new Color(0.42f, 0.03f, 0.03f, Mathf.Clamp01(halo * 0.9f * (0.6f + 0.6f * n)));
+            });
+        }
+
+        /// <summary>
+        /// Puncture (1.1.0 retest 4): a round through fabric or gear. A black hole (r ~0.16) with a frayed edge of torn
+        /// fibres and a dark wet ring where blood soaked the cloth around it; no bright red halo. The bleeding's stains
+        /// add the blood that runs from it.
+        /// </summary>
+        internal static Texture2D Puncture()
+        {
+            var rng = new System.Random(2468);
+            return Make((x, y, r, a) =>
+            {
+                float n = Noise(x * 11f, y * 11f, rng);
+                float edge = 0.16f + 0.025f * Mathf.Sin(a * 7f + 0.4f) + 0.015f * Mathf.Sin(a * 13f) + 0.02f * n;
+                if (r < edge * 0.7f) return new Color(0.02f, 0.012f, 0.01f, 1f);
+                if (r < edge) return Color.Lerp(new Color(0.02f, 0.012f, 0.01f, 1f), new Color(0.09f, 0.04f, 0.035f, 1f), (r - edge * 0.7f) / (edge * 0.3f));
+                // Torn fibres: thin dark streaks sticking out past the edge.
+                float fibre = Mathf.Pow(Mathf.Abs(Mathf.Sin(a * 17f + 2.1f * n)), 18f);
+                if (r < edge + 0.05f + 0.06f * fibre) return new Color(0.13f, 0.06f, 0.05f, 0.95f) * (0.85f + 0.3f * n);
+                float soak = 1f - Mathf.InverseLerp(edge + 0.05f, 0.34f + 0.08f * n, r);
+                return new Color(0.2f, 0.03f, 0.025f, Mathf.Clamp01(soak * 0.85f * (0.7f + 0.5f * n)));
             });
         }
 

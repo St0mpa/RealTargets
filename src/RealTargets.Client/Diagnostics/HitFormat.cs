@@ -67,6 +67,10 @@ namespace RealTargets.Diagnostics
                     sb.Append($" plate={Plate(s)}");
                 }
                 sb.Append($" dmg={s.DamageIn:F1}->{s.DamageOut:F1} pen={s.PenetrationIn:F1} penetrated={s.Penetrated}");
+                if (s.Armour.Any)
+                {
+                    sb.Append($" armour=\"{s.Armour.Name}\" cl{s.Armour.Class} {s.Armour.Outcome.ToString().ToLowerInvariant()}");
+                }
                 if (s.ImpactSpeed > 0f && i > 0)
                 {
                     sb.Append($" v={s.ImpactSpeed:F0}");
@@ -76,6 +80,20 @@ namespace RealTargets.Diagnostics
                     sb.Append($" hp={hp.current:F0}/{hp.maximum:F0}");
                 }
             }
+
+            // The way through flesh: "legs=2: LeftForearm->LeftForearm | RibcageUp->SpineTop (inferred)".
+            if (hit.Legs.Count > 0)
+            {
+                sb.Append($" legs={hit.Legs.Count}:");
+                for (int i = 0; i < hit.Legs.Count; i++)
+                {
+                    var l = hit.Legs[i];
+                    sb.Append(i == 0 ? " " : " | ").Append(hit.Segments[l.EntrySegment].Collider);
+                    if (l.FromInside) sb.Append(" (from inside)");
+                    sb.Append(l.Exited ? $"->{l.ExitCollider}{(l.InferredExit ? " (inferred)" : "")}" : "->stayed in");
+                }
+            }
+            if (hit.ContinuesFrom != null) sb.Append(" continues=earlier frame");
 
             return sb.ToString();
         }
