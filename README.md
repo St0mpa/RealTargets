@@ -13,6 +13,12 @@ Purely visual: damage, bleeding HP loss, death and AI stay vanilla EFT (and SAIN
   <img src="images/card-2-exits.png" width="32%" alt="Exit wounds on a back and a skull burst">
   <img src="images/card-3-pellets.png" width="32%" alt="A tight buckshot pattern, each pellet its own wound, blood soaking down the shirt">
 </p>
+<p>
+  <img src="images/card-4-autopsy.png" width="24%" alt="The AUTOPSY tab's 3D X-ray: skeleton, organ zones and two shots through the forearm into the chest">
+  <img src="images/card-5-cuts.png" width="24%" alt="A severed forearm with a flesh-and-bone cross-section">
+  <img src="images/card-6-drag.png" width="24%" alt="A blood trail behind a dragged body">
+  <img src="images/card-7-death.png" width="24%" alt="Your own autopsy on the raid results: the X-ray of your death with every numbered shot">
+</p>
 
 ## Features
 - **Entry and exit wounds** on clothing and skin, placed where each round actually went through. Exits are
