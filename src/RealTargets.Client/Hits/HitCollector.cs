@@ -134,7 +134,7 @@ namespace RealTargets.Hits
             {
                 Target = target,
                 TargetName = target.Profile?.Nickname ?? "?",
-                IsAI = target.IsAI,
+                IsAI = Targets.IsBot(target),
                 IsLocalPlayer = target.IsYourPlayer,
                 ShotId = shotId,
                 SourceId = sourceId,

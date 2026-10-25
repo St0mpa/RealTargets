@@ -66,6 +66,8 @@ namespace RealTargets.Gore
             // A stretch that goes on from inside (the same round's earlier-frame hit) has no entry to mist from.
             bool skipEntry = HollywoodFx.SkipEntryMist || path.FromInside;
             bool skipExit = HollywoodFx.SkipExitBlood;
+            // 1.2.0: a round through a breathing lung throws bright, frothy blood; anything else (or a corpse) venous.
+            var tone = !corpse && WoundPath.IsChest(path.Entry.Collider) ? BloodTone.Pulmonary : BloodTone.Venous;
 
             if (path.Exited)
             {
@@ -74,9 +76,10 @@ namespace RealTargets.Gore
                 {
                     int count = Mathf.RoundToInt(Mathf.Clamp(e / 70f, 3f, 45f) * (bigHead ? 1.6f : 1f));
                     float speed = Mathf.Lerp(2.5f, 9f, power);
-                    blood.Emit(path.End + dir * 0.01f, dir * speed, 14f, count, 0.007f);
+                    // blood-3: the fast fine drops are a fine spray (mm speckles); the heavy ones below still splat.
+                    blood.Emit(path.End + dir * 0.01f, dir * speed, 14f, count, 0.006f, tone, true);
                     // Heavier, slower drops that fall close behind the body.
-                    blood.Emit(path.End + dir * 0.01f, dir * speed * 0.3f, 30f, Mathf.Max(2, count / 4), 0.011f);
+                    blood.Emit(path.End + dir * 0.01f, dir * speed * 0.3f, 30f, Mathf.Max(2, count / 4), 0.011f, tone);
                 }
 
                 if (e > 250f && !skipExit)
@@ -84,7 +87,7 @@ namespace RealTargets.Gore
                     // 0.10.1: 0.10.0's 3-12 cm puffs were never seen (Stompa).
                     float size = Mathf.Lerp(0.08f, 0.22f, power) * (bigHead ? 1.6f : 1f);
                     int puffs = Mathf.RoundToInt(Mathf.Lerp(6f, 18f, power) * (bigHead ? 2f : 1f));
-                    BloodMist.Instance?.Puff(path.End + dir * 0.04f, dir, size, Mathf.Lerp(0.55f, 0.9f, power), puffs);
+                    BloodMist.Instance?.Puff(path.End + dir * 0.04f, dir, size, Mathf.Lerp(0.55f, 0.9f, power), puffs, 1f, tone);
                 }
 
                 if (last && Plugin.VisualsSpatter.Value && e > 400f && !HollywoodFx.SkipWallSpatter) Spatter(path, e, bigHead);

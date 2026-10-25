@@ -1,16 +1,16 @@
 {
   "_comment": "Test kit mailed to Stompa before every test (Messenger > Commando, via SPT's 'spt give'). Stompa loses the kit in each test raid, so every new kitId mails the whole kit; F4 in the menus resends it. Ghost/lab tests: lean (only what the test needs, presets with their magazine + one magazine of ammo). Normal raids without ghost (Stompa, 2026-10-16): a full META-style kit with plenty of magazines and ammo + the meds a raid needs. 'spt give' sends a template with a default preset as the whole preset (weapons with their magazine, armour with its plates); magazines and meds come one per count, ammo split into stacks. Template ids verified in the SPT 4.1.6 database (2026-10-19).",
-  "kitId": "1.1.0-rc-6",
-  "note": "1.1.0 release check 6 (rc-6: scaled skins baked with their full transform): lab only, ghost on. BEAR PMC (F3 PMC T1 or T3) in a Tiger T-shirt: shots on the shirt, then loot AUTOPSY torso.",
+  "kitId": "1.2.0-loc-1",
+  "note": "1.2.0 live raid (ghost on): localization + F12 sections + perf-7 (testing.md \"1.2.0 live raid\"): M4A1 + one magazine, shoot bots, open their AUTOPSY, check the death screen if you die. Lean kit.",
   "items": [
     {
-      "name": "Colt M4A1 5.56x45 (lab: preset includes its 30-round magazine)",
+      "name": "Colt M4A1 5.56x45 (default preset with its 30-round magazine)",
       "tpl": "5447a9cd4bdc2dbd208b4567",
       "count": 1
     },
     {
-      "name": "5.56x45 M855 (lab: one magazine)",
-      "tpl": "54527a984bdc2d4e668b4567",
+      "name": "5.56x45 M855A1 (one magazine)",
+      "tpl": "54527ac44bdc2d36668b4567",
       "count": 30
     },
     {

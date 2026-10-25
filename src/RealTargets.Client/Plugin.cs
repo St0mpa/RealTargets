@@ -11,6 +11,7 @@ using RealTargets.Diagnostics;
 using RealTargets.Features;
 using RealTargets.Gore;
 using RealTargets.Hits;
+using RealTargets.Localization;
 #if !PUBLIC
 using RealTargets.Lab;
 #endif
@@ -21,6 +22,8 @@ namespace RealTargets
 {
     [BepInPlugin(PluginInfo.Guid, PluginInfo.Name, PluginInfo.Version)]
     [BepInDependency(PluginInfo.SptCoreGuid, PluginInfo.SptMinVersion)]
+    // Soft: load after Fika when it is there, so its types are found (ADR 0014).
+    [BepInDependency(Compat.Fika.Guid, BepInDependency.DependencyFlags.SoftDependency)]
 #if !PUBLIC
     [BepInDependency(PluginInfo.BigBrainGuid)]
 #endif
@@ -39,9 +42,11 @@ namespace RealTargets
 
         // [General]
         internal static ConfigEntry<bool> ModEnabled;
+        internal static ConfigEntry<string> Language;
 #if !PUBLIC
         internal static ConfigEntry<bool> PerfLog;
         internal static ConfigEntry<KeyboardShortcut> BenchmarkKey;
+        internal static ConfigEntry<KeyboardShortcut> SplitBenchmarkKey;
 #endif
 
         // [Blood]
@@ -65,7 +70,11 @@ namespace RealTargets
         internal static ConfigEntry<bool> VisualsSpatter;
         internal static ConfigEntry<bool> VisualsMouth;
         internal static ConfigEntry<float> VisualsDistance;
+        internal static ConfigEntry<float> BrightnessBodies, BrightnessGround, BrightnessGore;
         internal static ConfigEntry<DecalShaderMode> DecalShader;
+        internal static ConfigEntry<GroundShaderMode> GroundShader;
+        internal static ConfigEntry<float> BrightnessGroundEft, WetnessGroundEft;
+        internal static ConfigEntry<bool> HideGameBodyDecals;
 
         // [Death screen]
         internal static ConfigEntry<bool> DeathScreenWounds;
@@ -150,9 +159,11 @@ namespace RealTargets
             Log = Logger;
             BindConfig();
 
+            Compat.Fika.Init();
             ShotContext.Enable();
-            new ApplyShotPatch().Enable();
+            ApplyShotPatch.Enable();
             Blast.Enable();
+            BodyDecalPainterPatch.Enable();
 #if !PUBLIC
             GhostModePatches.Enable();
             ModalInputPatches.Enable();
@@ -191,6 +202,8 @@ namespace RealTargets
 
         private void LateUpdate()
         {
+            // Fika's headless host draws nothing: no hits are captured there, so nothing to warm or flush.
+            if (Compat.Fika.IsHeadless) return;
             // Warm-up runs on the loading screen: outside the timing scope (0.10.12 logged its 200 ms as a `Hits` frame).
             if (_raidReset && Singleton<GameWorld>.Instantiated) WarmUp();
             using var perf = RealTargets.Diagnostics.Perf.Measure(RealTargets.Diagnostics.PerfArea.Hits);
@@ -322,7 +335,8 @@ namespace RealTargets
                 meshes.Add(baked);
                 smr.BakeMesh(baked, true);
 
-                // Mesh collider cooked and hit (WoundDecals.Surface), then a convex one on a rigidbody (gore pieces).
+                // Mesh collider cooked and hit (death screen; body surfaces had their own until perf-6), then a convex one on a
+                // rigidbody (gore pieces).
                 var colGo = new GameObject("collider");
                 colGo.transform.SetParent(root.transform, false);
                 var mc = colGo.AddComponent<MeshCollider>();
@@ -381,16 +395,25 @@ namespace RealTargets
 
         private void BindConfig()
         {
-            ModEnabled = Config.Bind("General", "Enabled", true,
+            // 1.2.0 localization: bound first, so the F12 descriptions below can follow it.
+            Language = Config.Bind(ConfigLayout.General, "Language", Loc.Auto,
+                "Language of RealTargets' own text (autopsy, death screen, these descriptions): Auto = the game's language; or a code from " +
+                "BepInEx/plugins/RealTargets/locales (ru, ge, fr...). English when that language has no file. Descriptions change after a restart.");
+            Loc.Init(Path.GetDirectoryName(Info.Location), Language);
+            ModEnabled = Config.Bind(ConfigLayout.General, "Enabled", true,
                 "Master switch: off = no new blood, wounds, gore, corpse motion or footprints (what is already in the raid stays). For FPS comparisons and quick disabling.");
 #if !PUBLIC
-            PerfLog = Config.Bind("General", "Performance log", true,
+            PerfLog = Config.Bind(ConfigLayout.General, "Performance log", true,
                 "Every 10 s in a raid, one [Perf] log line: FPS (average, 1 % low), RealTargets' own CPU time per frame and how many effects exist.");
-            BenchmarkKey = Config.Bind("General", "Benchmark key", new KeyboardShortcut(KeyCode.F7),
+            BenchmarkKey = Config.Bind(ConfigLayout.General, "Benchmark key", new KeyboardShortcut(KeyCode.F7),
                 "In a raid: measure the next 60 s and log one [Perf] BENCHMARK summary (for comparing Enabled on and off).");
+            // perf-3: F2, not F8 (Fika's Extract Key is F8: leaving a raid started a second split).
+            SplitBenchmarkKey = Config.Bind(ConfigLayout.General, "Split benchmark key", new KeyboardShortcut(KeyCode.F2),
+                "In a raid: 7 steps of 30 s, each hiding one kind of our blood (droplets, body patches, pools and ground marks, all, all plus the overlay), " +
+                "logged as [Perf] SPLIT lines: what each kind costs per frame. Everything shows again at the end.");
 #endif
 
-            const string blood = "Blood";
+            const string blood = ConfigLayout.Bleeding;
             BloodVolume = Config.Bind(blood, "Blood volume (ml)", 5000f,
                 new ConfigDescription("Blood in a body. At most ~65 % of it can run out (pools stop growing there).",
                     new AcceptableValueRange<float>(3000f, 7000f)));
@@ -408,7 +431,7 @@ namespace RealTargets
                 new ConfigDescription("After death, open wounds keep draining by gravity (more if facing down), tapering with this " +
                     "half-life. 0 = bleeding stops at death.", new AcceptableValueRange<float>(0f, 600f)));
 
-            const string visuals = "Visuals";
+            const string visuals = ConfigLayout.BloodAndWounds;
             VisualsEnabled = Config.Bind(visuals, "Enabled", true, "All our blood and wound visuals.");
             VisualsDrips = Config.Bind(visuals, "Drips", true, "Blood droplets welling and pouring from every open wound.");
             VisualsSpurts = Config.Bind(visuals, "Arterial spurts", true, "Pulsing droplet jets from cut arteries at heart rate, weakening after death.");
@@ -429,16 +452,51 @@ namespace RealTargets
                 "Anyone who walks through a wet pool (you or a bot) leaves boot prints after it, fainter with every step.");
             VisualsPools = Config.Bind(visuals, "Pools", true,
                 "Blood pools spread under the wounds of dead (or prone) bodies, sized by the blood that ran out there, drying darker.");
-            DecalShader = Config.Bind(visuals, "Decal shader", DecalShaderMode.Lit,
+            HideGameBodyDecals = Config.Bind(visuals, "Hide game blood decals on bots", true,
+                "The game paints its own red blood splash into a bot's clothing texture on every hit (with HollywoodFX, its 'Wound " +
+                "Decals on Bodies' texture). Our wounds, soaks and runs already show the hit, so the splash only covers them. " +
+                "Turn off to keep the game's (or HollywoodFX's) splash. You and other human players always keep it.");
+            VisualsDistance = Config.Bind(visuals, "Max distance (m)", 80f,
+                new ConfigDescription("No blood visuals beyond this distance from the camera.", new AcceptableValueRange<float>(10f, 300f)));
+
+            const string look = ConfigLayout.BloodLook;
+            DecalShader = Config.Bind(look, "Decal shader", DecalShaderMode.Lit,
                 "How wounds and ground blood are drawn. Lit: darken pass + a colour pass with a real lit shader (the map's lights " +
                 "and exposure decide the brightness, wet sheen). Hybrid (0.10.2): the colour pass is unlit, scaled by our own light " +
                 "estimate (glowed in dark rooms). Multiply: darken/tint only (invisible on black cloth). AlphaBlended: unlit colour " +
                 "pass only. Switches live (stumps and gibs follow Lit only at the start of a raid).");
             DecalShader.SettingChanged += (_, __) => GroundBlood.ApplyDecalShader();
-            VisualsDistance = Config.Bind(visuals, "Max distance (m)", 80f,
-                new ConfigDescription("No blood visuals beyond this distance from the camera.", new AcceptableValueRange<float>(10f, 300f)));
+            // blood-2 test (Stompa, 2026-10-20): our stock lit shaders come out 2-4x brighter than EFT's own surfaces (EFT renders
+            // in Gamma; characters use EFT's p0 shaders), most on bodies and in direct sun: a stain at 0.16 red read near-neon.
+            // blood-3 test: bodies 0.3 read as blood in a lit hall (Stompa); ground 0.75 still vivid in sun -> 0.55.
+            BrightnessBodies = Config.Bind(look, "Blood brightness on bodies", 0.3f,
+                new ConfigDescription("Scales wounds and blood stains on bodies (live). Lower if blood on clothing looks like bright paint " +
+                    "under a torch or in the sun.", new AcceptableValueRange<float>(0.1f, 1.5f)));
+            BrightnessGround = Config.Bind(look, "Blood brightness on the ground", 0.55f,
+                new ConfigDescription("Scales pools, drops, splats, prints and smears (live).", new AcceptableValueRange<float>(0.1f, 1.5f)));
+            BrightnessGore = Config.Bind(look, "Gore brightness (stumps, gibs)", 0.5f,
+                new ConfigDescription("Scales cut surfaces, gibs and the skull crater (live).", new AcceptableValueRange<float>(0.1f, 1.5f)));
+            BrightnessBodies.SettingChanged += (_, __) => LitBlood.ApplyBrightness();
+            BrightnessGround.SettingChanged += (_, __) => LitBlood.ApplyBrightness();
+            BrightnessGore.SettingChanged += (_, __) => LitBlood.ApplyBrightness();
+            // blood-5 (ADR 0016, blood-4 test: ground blood near-black in shade and bright red in sun, pools matte with the floor's
+            // grime on them): ground blood on EFT's own shaders, switchable live for an A/B in one raid.
+            // blood-5b test (Stompa, 2026-10-24): EftMatte "the best option", Stock "not good", EftWet white in shade -> EftMatte.
+            GroundShader = Config.Bind(look, "Ground blood shader", GroundShaderMode.EftMatte,
+                "What pools, drops, splats, prints and drag smears are drawn with (Decal shader = Lit; live). EftMatte (default): the " +
+                "game's own alpha-tested shader, lit like the map around it. Stock: Unity's legacy shader as in 1.1.0, tamed by " +
+                "'Blood brightness on the ground'. EftWet: experimental, the game's specular shader; still renders white in shade.");
+            GroundShader.SettingChanged += (_, __) => GroundBlood.ApplyDecalShader();
+            // blood-5c (Stompa: EftMatte pools "really bright red. It should be darker"): 1.0 -> 0.7.
+            BrightnessGroundEft = Config.Bind(look, "Blood brightness on the ground (EFT shader)", 0.7f,
+                new ConfigDescription("Scales ground blood while 'Ground blood shader' is EftWet or EftMatte (live).", new AcceptableValueRange<float>(0.1f, 2f)));
+            WetnessGroundEft = Config.Bind(look, "Ground blood wetness (EFT shader)", 1f,
+                new ConfigDescription("Scales the sheen and reflection of ground blood with 'Ground blood shader' EftWet (live). " +
+                    "Lower if pools look like chrome, higher if they look dry.", new AcceptableValueRange<float>(0f, 3f)));
+            BrightnessGroundEft.SettingChanged += (_, __) => LitBlood.ApplyBrightness();
+            WetnessGroundEft.SettingChanged += (_, __) => LitBlood.ApplyBrightness();
 
-            const string gore = "Gore";
+            const string gore = ConfigLayout.Dismemberment;
             GoreEnabled = Config.Bind(gore, "Dismemberment", true,
                 "Heads and limbs come apart on the killing shot or on a corpse (never on a living bot), with realistic thresholds below.");
             GoreGibs = Config.Bind(gore, "Gibs", true, "Flesh and skull pieces fly when a head or limb comes apart.");
@@ -469,19 +527,7 @@ namespace RealTargets
             HeadCumulativeHits = Config.Bind(gore, "Cumulative head hits", 3,
                 new ConfigDescription("Least number of rounds in the head before it can come apart from repeated hits.", new AcceptableValueRange<int>(1, 30)));
 
-            DeathScreenWounds = Config.Bind("Death screen", "Wounds on your PMC", true,
-                "After a death, your PMC on the raid results screen shows what hit you: entry and exit wounds, blood on the clothes, " +
-                "a destroyed head or lost limbs (the same rules as on bots).");
-            DeathScreenReport = Config.Bind("Death screen", "Report", DeathReportMode.RealTargets,
-                "Whose report shows over your PMC on the raid results after a death; switches live. RealTargets: our AUTOPSY " +
-                "switch (TraumaCore's hit markers and labels are hidden). TraumaCore: only TraumaCore's report, no AUTOPSY switch. " +
-                "Both: TraumaCore's markers on the model and our AUTOPSY switch. Without TraumaCore installed, RealTargets and Both are the same.");
-            DeathScreenAutopsyKey = Config.Bind("Death screen", "Autopsy key", new KeyboardShortcut(KeyCode.X),
-                "On the raid results after a death: switches the model spot between your wounded PMC and the AUTOPSY of your own " +
-                "death (X-ray in the death pose, every shot that hit you and who fired it, cause of death, health at death). " +
-                "The AUTOPSY button next to the model does the same.");
-
-            const string impacts = "Impacts";
+            const string impacts = ConfigLayout.Impacts;
             ImpactsEnabled = Config.Bind(impacts, "Enabled", true, "Bullets push dead bodies (momentum at the hit bone).");
             PushStrength = Config.Bind(impacts, "Push strength", 2f,
                 new ConfigDescription("Multiplier on the bullet momentum given to a corpse (1 = physical momentum transfer; " +
@@ -491,14 +537,56 @@ namespace RealTargets
             BlastEnabled = Config.Bind(impacts, "Blast injuries", true,
                 "Grenade blasts throw corpses within 6 m away from the charge (by overpressure). Damage to the living is EFT's.");
 
-            HfxPreferBlood = Config.Bind("HollywoodFX", "Prefer its blood", HfxBloodMode.Off,
+            const string flinch = ConfigLayout.Flinch;
+            FlinchEnabled = Config.Bind(flinch, "Enabled", false,
+                "Living bots flinch per limb via EFT's IK hit reaction (off by default: looks like a shake on top of the animation).");
+            FlinchStrength = Config.Bind(flinch, "Strength", 1.5f,
+                new ConfigDescription("Global multiplier on the flinch force (EFT's own reaction = 1).",
+                    new AcceptableValueRange<float>(0f, 5f)));
+            FlinchMin = Config.Bind(flinch, "Minimum", 0.3f,
+                new ConfigDescription("Smallest flinch force for any hit that gets through.", new AcceptableValueRange<float>(0f, 3f)));
+            FlinchMax = Config.Bind(flinch, "Maximum", 3f,
+                new ConfigDescription("Largest flinch force (caps .50 cal / shotgun point blank).", new AcceptableValueRange<float>(0.5f, 8f)));
+            FlinchHoldSeconds = Config.Bind(flinch, "Full IK hold (s)", 1f,
+                new ConfigDescription("How long the bot's full-body IK stays in full-quality mode after a hit (EFT uses 0.6).",
+                    new AcceptableValueRange<float>(0.3f, 3f)));
+
+            const string autopsy = ConfigLayout.Autopsy;
+            AutopsyEnabled = Config.Bind(autopsy, "Enabled", true,
+                "AUTOPSY tab next to LOOT when you loot a body: every shot that hit it (shooter, weapon, ammo, distance, " +
+                "armour, damage, path through the body), the killing shot, health at death and a front/back body chart.");
+            AutopsyOnlyMine = Config.Bind(autopsy, "Only my shots", false,
+                "List and draw only your own shots (bot-vs-bot hits on the same body are hidden).");
+            AutopsySkeleton = Config.Bind(autopsy, "3D skeleton", true,
+                "Simplified skeleton inside the 3D body (orange = fractured at death).");
+            AutopsyOrgans = Config.Bind(autopsy, "3D organ zones", true,
+                "Approximate organ zones inside the 3D body; the ones a shot went through light up.");
+            AutopsyCavities = Config.Bind(autopsy, "3D energy cavities", true,
+                "Glowing spindle along each wound channel: the temporary cavity, wider where the round dumped more energy.");
+            AutopsyDragCamera = Config.Bind(autopsy, "3D drag turns the camera", false,
+                "Off: dragging turns the body with the mouse (left button) and right-drag slides it up/down with the mouse. " +
+                "On: both move the camera instead (the opposite directions).");
+
+            DeathScreenWounds = Config.Bind(ConfigLayout.DeathScreen, "Wounds on your PMC", true,
+                "After a death, your PMC on the raid results screen shows what hit you: entry and exit wounds, blood on the clothes, " +
+                "a destroyed head or lost limbs (the same rules as on bots).");
+            DeathScreenReport = Config.Bind(ConfigLayout.DeathScreen, "Report", DeathReportMode.RealTargets,
+                "Whose report shows over your PMC on the raid results after a death; switches live. RealTargets: our AUTOPSY " +
+                "switch (TraumaCore's hit markers and labels are hidden). TraumaCore: only TraumaCore's report, no AUTOPSY switch. " +
+                "Both: TraumaCore's markers on the model and our AUTOPSY switch. Without TraumaCore installed, RealTargets and Both are the same.");
+            DeathScreenAutopsyKey = Config.Bind(ConfigLayout.DeathScreen, "Autopsy key", new KeyboardShortcut(KeyCode.X),
+                "On the raid results after a death: switches the model spot between your wounded PMC and the AUTOPSY of your own " +
+                "death (X-ray in the death pose, every shot that hit you and who fired it, cause of death, health at death). " +
+                "The AUTOPSY button next to the model does the same.");
+
+            HfxPreferBlood = Config.Bind(ConfigLayout.Compatibility, "HollywoodFX: prefer its blood", HfxBloodMode.Off,
                 "Only when HollywoodFX is installed; switches live. Off: both mods' blood. Overlaps: ours skips what HollywoodFX " +
                 "already draws at the hit: the mist at the entry (backspatter) while its gore effects are on, and the splash on " +
                 "the wall behind while its blood splatter is on. All: also our exit spray, exit mist and the squeeze of blood " +
                 "from a shot corpse, so only HollywoodFX's blood shows at the moment of the hit (it has none at the exit side). " +
                 "Always ours: wounds, bleeding, stains, pools, footprints, mouth blood and gore.");
 
-            const string model = "Hit model";
+            const string model = ConfigLayout.HitModel;
             VolleyWindow = Config.Bind(model, "Volley window", 0.05f,
                 new ConfigDescription("Seconds to wait for the rest of a cartridge's hits before reacting, e.g. shotgun pellets " +
                     "that land a frame apart at range, or a bullet that crosses a plate and the body in different " +
@@ -521,37 +609,7 @@ namespace RealTargets
             MassiveEnergy = Config.Bind(model, "Massive threshold (J)", 1800f,
                 new ConfigDescription("Effective energy from which a hit counts as MASSIVE.", new AcceptableValueRange<float>(100f, 10000f)));
 
-            const string flinch = "Flinch";
-            FlinchEnabled = Config.Bind(flinch, "Enabled", false,
-                "Living bots flinch per limb via EFT's IK hit reaction (off by default: looks like a shake on top of the animation).");
-            FlinchStrength = Config.Bind(flinch, "Strength", 1.5f,
-                new ConfigDescription("Global multiplier on the flinch force (EFT's own reaction = 1).",
-                    new AcceptableValueRange<float>(0f, 5f)));
-            FlinchMin = Config.Bind(flinch, "Minimum", 0.3f,
-                new ConfigDescription("Smallest flinch force for any hit that gets through.", new AcceptableValueRange<float>(0f, 3f)));
-            FlinchMax = Config.Bind(flinch, "Maximum", 3f,
-                new ConfigDescription("Largest flinch force (caps .50 cal / shotgun point blank).", new AcceptableValueRange<float>(0.5f, 8f)));
-            FlinchHoldSeconds = Config.Bind(flinch, "Full IK hold (s)", 1f,
-                new ConfigDescription("How long the bot's full-body IK stays in full-quality mode after a hit (EFT uses 0.6).",
-                    new AcceptableValueRange<float>(0.3f, 3f)));
-
-            const string autopsy = "Autopsy";
-            AutopsyEnabled = Config.Bind(autopsy, "Enabled", true,
-                "AUTOPSY tab next to LOOT when you loot a body: every shot that hit it (shooter, weapon, ammo, distance, " +
-                "armour, damage, path through the body), the killing shot, health at death and a front/back body chart.");
-            AutopsyOnlyMine = Config.Bind(autopsy, "Only my shots", false,
-                "List and draw only your own shots (bot-vs-bot hits on the same body are hidden).");
-            AutopsySkeleton = Config.Bind(autopsy, "3D skeleton", true,
-                "Simplified skeleton inside the 3D body (orange = fractured at death).");
-            AutopsyOrgans = Config.Bind(autopsy, "3D organ zones", true,
-                "Approximate organ zones inside the 3D body; the ones a shot went through light up.");
-            AutopsyCavities = Config.Bind(autopsy, "3D energy cavities", true,
-                "Glowing spindle along each wound channel: the temporary cavity, wider where the round dumped more energy.");
-            AutopsyDragCamera = Config.Bind(autopsy, "3D drag turns the camera", false,
-                "Off: dragging turns the body with the mouse (left button) and right-drag slides it up/down with the mouse. " +
-                "On: both move the camera instead (the opposite directions).");
-
-            const string debug = "Debug";
+            const string debug = ConfigLayout.Debug;
             LogWounds = Config.Bind(debug, "Log wound placement", Dev,
                 "One log line per wound patch: where it was placed (skinned / flat) or why not. For tests and bug reports.");
             LogHits = Config.Bind(debug, "Log hits", Dev,
@@ -559,7 +617,7 @@ namespace RealTargets
             LogBlood = Config.Bind(debug, "Log blood", Dev,
                 "Write each bleed event (new site, death, treatment, drain end), gore event and corpse push to the BepInEx log.");
 #if !PUBLIC
-            LabMenuKey = Config.Bind("Test lab", "Spawn menu key", new KeyboardShortcut(KeyCode.F3),
+            LabMenuKey = Config.Bind(ConfigLayout.TestLab, "Spawn menu key", new KeyboardShortcut(KeyCode.F3),
                 "Opens the test lab spawn menu: spawn ONE Scav or PMC of a chosen armour tier in front of you.");
             DebugMode = Config.Bind(debug, "Debug mode", true,
                 "Master switch for the in-raid debug tools: hit list and Blood tab.");
@@ -581,7 +639,7 @@ namespace RealTargets
                 "Bots never register you as an enemy (testing only). Switch on before bots notice you; " +
                 "bots that already know about you keep fighting.");
 
-            const string lab = "Test lab";
+            const string lab = ConfigLayout.TestLab;
             LabSpawnKey = Config.Bind(lab, "Spawn lineup key", new KeyboardShortcut(KeyCode.F6),
                 "Spawn 10 standing dummies in front of you: front row 5 scavs, back row 5 PMCs, armour tiers T0-T4 left to right. " +
                 "Best with raid setting AI amount: None. Needs Debug mode on.");
@@ -596,6 +654,14 @@ namespace RealTargets
                 "In the menus: mail the whole current test kit again, including weapons and gear.");
             TestKitCommandoId = Config.Bind(lab, "Commando contact id", "6723fd51c5924c57ce0ca01e",
                 "SPT's Commando chat-bot id (SPT_Data/configs/core.json, chatbotFeatures.ids.commando).");
+#endif
+
+            // 1.2.0: numbered F12 sections (old values carried over), bind order kept inside each, then the language.
+            ConfigLayout.Migrate(Config);
+            ConfigLayout.Order(Config);
+            Loc.LocalizeConfig(Config);
+#if !PUBLIC
+            Loc.Export(Config);
 #endif
         }
     }

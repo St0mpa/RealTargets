@@ -12,7 +12,6 @@ namespace RealTargets.Gore
     internal sealed class BloodMist : MonoBehaviour
     {
         private const int MaxParticles = 600;
-        private static readonly Color Blood = new Color(0.5f, 0.04f, 0.035f, 1f);
 
         internal static BloodMist Instance { get; private set; }
 
@@ -38,14 +37,14 @@ namespace RealTargets.Gore
         /// or limb coming apart). At 1 the puffs brake to 0.4 m/s and hang ~1 s, which read as slow-motion
         /// particles drifting out of an exploding head (0.10.3 test).
         /// </summary>
-        internal void Puff(Vector3 position, Vector3 direction, float size, float density, int count, float burst = 1f)
+        internal void Puff(Vector3 position, Vector3 direction, float size, float density, int count, float burst = 1f, BloodTone tone = BloodTone.Venous)
         {
-            if (!Plugin.VisualsMist.Value || !Ensure()) return;
+            if (!Plugin.VisualsMist.Value || BloodParticles.PerfHidden || !Ensure()) return;
 
             // 0.10.1: floor raised from 0.3 (in Factory's light the mist came out near black).
             // 0.10.3: top end lowered (SceneLight saturates on Factory, unlit colours glowed).
             float light = Mathf.Lerp(0.55f, 0.8f, SceneLight.At(position, -direction));
-            var color = Blood * light;
+            var color = BloodPalette.Mist(tone) * light;
             color.a = Mathf.Clamp01(density);
             var dir = direction.sqrMagnitude > 1e-6f ? direction.normalized : Vector3.up;
 

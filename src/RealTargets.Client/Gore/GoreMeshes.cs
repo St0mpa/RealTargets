@@ -664,7 +664,8 @@ namespace RealTargets.Gore
             var clot = new Color(0.05f, 0.007f, 0.007f);
             var fat = new Color(0.3f, 0.24f, 0.14f);
             var fascia = new Color(0.24f, 0.16f, 0.14f);
-            var bone = new Color(0.44f, 0.39f, 0.32f);
+            // blood-2: a bright white bone dot under the torch: duller, a little blood-stained.
+            var bone = new Color(0.34f, 0.29f, 0.24f);
             var marrow = new Color(0.2f, 0.045f, 0.03f);
             var skin = new Color(0.12f, 0.022f, 0.02f);
             var cartilage = new Color(0.4f, 0.36f, 0.32f);

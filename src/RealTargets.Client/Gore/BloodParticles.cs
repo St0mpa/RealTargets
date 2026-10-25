@@ -25,8 +25,27 @@ namespace RealTargets.Gore
 
         internal static BloodParticles Instance { get; private set; }
         internal static string MaterialSource { get; private set; } = "none";
+        /// <summary>perf-3 (dev split benchmark): no droplets are emitted while set. Never set in the public build.</summary>
+        internal static bool PerfHidden = false;
 
-        private ParticleSystem _system;
+        /// <summary>Droplets in flight, all systems (for the [Perf] line).</summary>
+        internal int AliveCount
+        {
+            get
+            {
+                int n = 0;
+                foreach (var system in _systems)
+                {
+                    if (system != null) n += system.particleCount;
+                }
+                return n;
+            }
+        }
+
+        // One system per blood tone (1.2.0): a collision event carries no particle colour, so the tone of the mark a
+        // droplet leaves comes from the system it flew in.
+        // blood-3: plus a fine-spray system per tone (coughs, the fine part of an exit spray): its landings leave mm speckles.
+        private readonly ParticleSystem[] _systems = new ParticleSystem[6];
         private readonly List<ParticleCollisionEvent> _events = new List<ParticleCollisionEvent>(32);
         private readonly List<Vector3> _recentSplats = new List<Vector3>(64);
         private float _envBudget = EnvDecalsPerSecond;
@@ -55,24 +74,38 @@ namespace RealTargets.Gore
 
         internal void ResetRaid()
         {
-            if (_system != null)
-            {
-                _system.Clear();
-            }
+            ClearDroplets();
             _recentSplats.Clear();
         }
 
-        /// <summary>Emits droplets: a spurt burst (fast, many) or a drip (slow, one).</summary>
-        internal void Emit(Vector3 position, Vector3 velocity, float spreadDegrees, int count, float size)
+        /// <summary>Removes every droplet in flight (raid reset; perf-3 split benchmark).</summary>
+        internal void ClearDroplets()
         {
-            if (!EnsureSystem())
+            foreach (var system in _systems)
+            {
+                if (system != null) system.Clear();
+            }
+        }
+
+        /// <summary>Emits droplets: a spurt burst (fast, many) or a drip (slow, one), coloured by <paramref name="tone"/>.</summary>
+        internal void Emit(Vector3 position, Vector3 velocity, float spreadDegrees, int count, float size, BloodTone tone = BloodTone.Venous,
+            bool fine = false)
+        {
+            if (PerfHidden || !EnsureSystem())
             {
                 return;
             }
+            using var part = RealTargets.Diagnostics.Perf.Part(RealTargets.Diagnostics.PerfPart.Drips);
 
+            var system = _systems[(int)tone + (fine ? 3 : 0)] ?? _systems[0];
+            // blood-5 (blood-4 test: flat bright squares glowing over a dark floor): the shader is unlit, so the colour follows
+            // the light where the drops leave, as the mist does.
+            var colour = BloodPalette.Droplet(tone) * Mathf.Lerp(0.45f, 0.85f, SceneLight.At(position, Vector3.up));
+            colour.a = BloodPalette.Droplet(tone).a;
             var p = new ParticleSystem.EmitParams
             {
                 applyShapeToPosition = false,
+                startColor = colour,
             };
 
             for (int i = 0; i < count; i++)
@@ -82,7 +115,7 @@ namespace RealTargets.Gore
                 p.velocity = jitter * velocity * Random.Range(0.8f, 1.15f);
                 p.startSize = size * Random.Range(0.6f, 1.3f);
                 p.startLifetime = Random.Range(1.8f, 2.6f);
-                _system.Emit(p, 1);
+                system.Emit(p, 1);
             }
         }
 
@@ -91,33 +124,44 @@ namespace RealTargets.Gore
 
         private bool EnsureSystem()
         {
-            if (_system != null)
+            if (_systems[0] != null)
             {
                 return true;
             }
 
-            var go = new GameObject("RealTargets.Blood");
-            go.transform.SetParent(transform, false);
-            _system = go.AddComponent<ParticleSystem>();
-            _system.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+            var material = ResolveMaterial();
+            for (int t = 0; t < _systems.Length; t++)
+            {
+                _systems[t] = Build((BloodTone)(t % 3), material, t >= 3);
+            }
+            Plugin.Log.LogInfo($"Blood particles ready (material: {MaterialSource}, {_systems.Length} tones).");
+            return true;
+        }
 
-            var main = _system.main;
+        private ParticleSystem Build(BloodTone tone, Material material, bool fine)
+        {
+            var go = new GameObject("RealTargets.Blood." + tone + (fine ? ".Fine" : ""));
+            go.transform.SetParent(transform, false);
+            var system = go.AddComponent<ParticleSystem>();
+            system.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+
+            var main = system.main;
             main.simulationSpace = ParticleSystemSimulationSpace.World;
             main.gravityModifier = 1f;
             main.maxParticles = MaxParticles;
-            main.startColor = new Color(0.32f, 0.01f, 0.01f, 0.95f);
+            main.startColor = BloodPalette.Droplet(tone);
             main.startSize = 0.012f;
             main.startLifetime = 2.2f;
             main.startSpeed = 0f;
             main.playOnAwake = false;
             main.loop = false;
 
-            var emission = _system.emission;
+            var emission = system.emission;
             emission.enabled = false;
-            var shape = _system.shape;
+            var shape = system.shape;
             shape.enabled = false;
 
-            var collision = _system.collision;
+            var collision = system.collision;
             collision.enabled = true;
             collision.type = ParticleSystemCollisionType.World;
             collision.mode = ParticleSystemCollisionMode.Collision3D;
@@ -130,14 +174,22 @@ namespace RealTargets.Gore
             collision.collidesWith = LayersMaskController.HighPolyWithTerrainMask | LayersMaskController.HitColliderMask |
                                      (1 << LayersMaskController.DeadbodyLayer);
 
+            // blood-5: stretched along the velocity (a falling drop reads as a short streak at 60 fps), not a static square.
             var renderer = go.GetComponent<ParticleSystemRenderer>();
-            renderer.renderMode = ParticleSystemRenderMode.Billboard;
-            renderer.sharedMaterial = ResolveMaterial();
+            renderer.renderMode = ParticleSystemRenderMode.Stretch;
+            renderer.velocityScale = 0.012f;
+            renderer.lengthScale = 1f;
+            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            renderer.receiveShadows = false;
+            renderer.sharedMaterial = material;
 
-            go.AddComponent<BloodCollisionReceiver>().Owner = this;
-            _system.Play();
-            Plugin.Log.LogInfo($"Blood particles ready (material: {MaterialSource}).");
-            return true;
+            var receiver = go.AddComponent<BloodCollisionReceiver>();
+            receiver.Owner = this;
+            receiver.System = system;
+            receiver.Tone = tone;
+            receiver.Fine = fine;
+            system.Play();
+            return system;
         }
 
         /// <summary>Material: EFT's body-hit particle material, else built-in particle shaders.</summary>
@@ -173,8 +225,13 @@ namespace RealTargets.Gore
                 var shader = Shader.Find(name);
                 if (shader != null)
                 {
-                    MaterialSource = name;
-                    return new Material(shader) { color = new Color(0.32f, 0.01f, 0.01f, 0.95f) };
+                    MaterialSource = name + ", round drop sprite";
+                    // White: the particle colour (per tone) tints it. blood-5: with no texture every drop was a full square
+                    // (blood-4 test: "square boxes that fly"); HollywoodFX empties EFT's Body effect, so this is the usual path.
+                    var m = new Material(shader) { color = Color.white, mainTexture = DropTexture(), hideFlags = HideFlags.HideAndDontSave };
+                    if (m.HasProperty("_TintColor")) m.SetColor("_TintColor", new Color(0.5f, 0.5f, 0.5f, 0.5f));
+                    GroundBlood.NoSoftFade(m);
+                    return m;
                 }
             }
 
@@ -182,9 +239,36 @@ namespace RealTargets.Gore
             return null;
         }
 
-        internal void OnDropletCollision(GameObject other)
+        /// <summary>A drop: a round, slightly soft disc (white RGB, tinted per particle), a little denser in the middle.</summary>
+        private static Texture2D DropTexture()
         {
-            int count = _system.GetCollisionEvents(other, _events);
+            const int size = 32;
+            var pixels = new Color[size * size];
+            for (int j = 0; j < size; j++)
+            {
+                for (int i = 0; i < size; i++)
+                {
+                    float x = (i + 0.5f) / size - 0.5f, y = (j + 0.5f) / size - 0.5f;
+                    float r = Mathf.Sqrt(x * x + y * y) * 2f;
+                    float a = Mathf.Clamp01((1f - r) / 0.25f);
+                    pixels[j * size + i] = new Color(1f, 1f, 1f, a * a * (3f - 2f * a));
+                }
+            }
+            var tex = new Texture2D(size, size, TextureFormat.RGBA32, true)
+            {
+                name = "RealTargetsBloodDrop",
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Bilinear,
+                hideFlags = HideFlags.HideAndDontSave,
+            };
+            tex.SetPixels(pixels);
+            tex.Apply(true, false);
+            return tex;
+        }
+
+        internal void OnDropletCollision(ParticleSystem system, BloodTone tone, bool fine, GameObject other)
+        {
+            int count = system.GetCollisionEvents(other, _events);
             if (count == 0)
             {
                 return;
@@ -219,26 +303,35 @@ namespace RealTargets.Gore
             for (int i = 0; i < count; i++)
             {
                 var e = _events[i];
-                if (_envBudget < 1f || NearRecent(e.intersection))
+                if (fine)
+                {
+                    // Fine spray: half the drops leave a speckle, at half the budget, never merged or spaced.
+                    if (_envBudget < 0.5f || Random.value < 0.5f) continue;
+                    _envBudget -= 0.5f;
+                    ground.Speckle(e.intersection, e.normal, e.velocity, tone);
+                    continue;
+                }
+                // Drops falling straight onto a floor leave drip marks; anything hitting a wall or
+                // arriving with sideways speed (a spurt) splatters. Falling drops pass 2 m/s within
+                // 0.2 s, so total speed alone can't tell them apart.
+                var horizontal = new Vector2(e.velocity.x, e.velocity.z).magnitude;
+                bool drip = e.normal.y > 0.7f && horizontal < 0.8f;
+                // blood-5 (blood-4 test: a standing bleeder's drops never merged): a drip landing near a recent one is exactly
+                // the drop that should join that spot, so drips skip the 5 cm spacing (GroundBlood.Drip merges them).
+                if (_envBudget < 1f || (!drip && NearRecent(e.intersection)))
                 {
                     continue;
                 }
 
                 _envBudget -= 1f;
                 _recentSplats.Add(e.intersection);
-
-                // Drops falling straight onto a floor leave drip marks; anything hitting a wall or
-                // arriving with sideways speed (a spurt) splatters. Falling drops pass 2 m/s within
-                // 0.2 s, so total speed alone can't tell them apart.
-                var horizontal = new Vector2(e.velocity.x, e.velocity.z).magnitude;
-                bool floor = e.normal.y > 0.7f;
-                if (floor && horizontal < 0.8f)
+                if (drip)
                 {
-                    ground.Drip(e.intersection, e.normal);
+                    ground.Drip(e.intersection, e.normal, tone);
                 }
                 else
                 {
-                    ground.Splat(e.intersection, e.normal, e.velocity);
+                    ground.Splat(e.intersection, e.normal, e.velocity, tone);
                 }
             }
         }
@@ -257,6 +350,9 @@ namespace RealTargets.Gore
     internal sealed class BloodCollisionReceiver : MonoBehaviour
     {
         internal BloodParticles Owner;
+        internal ParticleSystem System;
+        internal BloodTone Tone;
+        internal bool Fine;
 
         private void OnParticleCollision(GameObject other)
         {
@@ -266,7 +362,7 @@ namespace RealTargets.Gore
             {
                 try
                 {
-                    Owner.OnDropletCollision(other);
+                    Owner.OnDropletCollision(System, Tone, Fine, other);
                 }
                 catch (System.Exception ex)
                 {

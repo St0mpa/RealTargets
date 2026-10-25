@@ -5,6 +5,7 @@ using Comfort.Common;
 using EFT;
 using EFT.InventoryLogic;
 using RealTargets.Hits;
+using RealTargets.Localization;
 using UnityEngine;
 
 namespace RealTargets.Gore
@@ -171,11 +172,11 @@ namespace RealTargets.Gore
                 float calibre = WoundDecals.Calibre(p.Caliber);
                 if (p.ProjectileCount <= 1 && calibre >= 12f && !PistolCalibre(p.Caliber) && path.Energy >= Plugin.HeadLargeCalibreEnergy.Value)
                 {
-                    why = $"{p.AmmoName} {calibre:F1} mm, {path.Energy:F0} J";
+                    why = Loc.F("why.calibre", ("ammo", p.AmmoName), ("calibre", calibre.ToString("F1")), ("energy", path.Energy.ToString("F0")));
                 }
                 else if (path.Energy >= Plugin.HeadAnyEnergy.Value)
                 {
-                    why = $"{p.AmmoName} {path.Energy:F0} J";
+                    why = Loc.F("why.energy", ("ammo", p.AmmoName), ("energy", path.Energy.ToString("F0")));
                 }
                 else if (p.ProjectileCount <= 1 && path.Energy >= Plugin.SkullBurstEnergy.Value && (burst == null || path.Energy > burstPath.Energy))
                 {
@@ -194,7 +195,7 @@ namespace RealTargets.Gore
             if (why == null && dominant.ProjectileCount > 1 && pellets >= Plugin.HeadPellets.Value &&
                 dominant.Distance <= Plugin.ShotgunRange.Value)
             {
-                why = $"{pellets} pellets ({dominant.AmmoName}) at {dominant.Distance:F1} m, {total:F0} J";
+                why = Loc.F("why.pellets_energy", ("pellets", pellets), ("ammo", dominant.AmmoName), ("distance", dominant.Distance.ToString("F1")), ("energy", total.ToString("F0")));
             }
 
             // Cumulative (0.10.8, Stompa: "head should get destroyed if shot enough times even with smaller calibres"):
@@ -205,7 +206,7 @@ namespace RealTargets.Gore
             body.HeadEnergy += total;
             if (why == null && body.HeadHits >= Plugin.HeadCumulativeHits.Value && body.HeadEnergy >= Plugin.HeadCumulativeEnergy.Value)
             {
-                why = $"cumulative: {body.HeadHits} hits, {body.HeadEnergy:F0} J";
+                why = Loc.P("why.cumulative", body.HeadHits, ("energy", body.HeadEnergy.ToString("F0")));
             }
             else if (pellets > 0 && Plugin.LogBlood.Value)
             {
@@ -215,7 +216,7 @@ namespace RealTargets.Gore
             {
                 // Below the destruction rules a full-power rifle (or .50 AE) bullet still bursts the skull
                 // open at the exit (0.10.5, Stompa): the head stays on.
-                if (burst != null) BurstSkull(volley.Target, burst, burstPath, $"{burst.AmmoName} {burstPath.Energy:F0} J", corpse);
+                if (burst != null) BurstSkull(volley.Target, burst, burstPath, Loc.F("why.energy", ("ammo", burst.AmmoName), ("energy", burstPath.Energy.ToString("F0"))), corpse);
                 return;
             }
 
@@ -244,7 +245,7 @@ namespace RealTargets.Gore
                 if (!WoundPath.Resolve(p, out var path) || !Limbs.Contains(path.Entry.Collider)) continue;
                 if (!HeavyCalibre(p.Caliber) || path.Energy < Plugin.LimbEnergy.Value) continue;
                 _limbHits.Add((volley.Target, path.Entry.Collider, path.Direction * Mathf.Lerp(3f, 8f, Mathf.Clamp01(path.Energy / 8000f)),
-                    $"{p.AmmoName} {path.Energy:F0} J", Time.time));
+                    Loc.F("why.energy", ("ammo", p.AmmoName), ("energy", path.Energy.ToString("F0"))), Time.time));
             }
         }
 
@@ -261,7 +262,7 @@ namespace RealTargets.Gore
                 if (!dead || !Plugin.GoreEnabled.Value) continue;
                 try
                 {
-                    Sever(target, collider, velocity, $"{why}, died {now - time:F2} s after it", corpse: false);
+                    Sever(target, collider, velocity, Loc.F("why.died_after", ("why", why), ("s", (now - time).ToString("F2"))), corpse: false);
                 }
                 catch (System.Exception ex)
                 {
@@ -306,7 +307,7 @@ namespace RealTargets.Gore
             float scale = Mathf.Pow(tntKg / 0.11f, 1f / 3f) * Plugin.BlastLimbRange.Value;
             foreach (var player in Singleton<GameWorld>.Instance.AllPlayersEverExisted.ToList())
             {
-                if (player == null || !player.IsAI || player.IsYourPlayer || player.ActiveHealthController == null ||
+                if (player == null || !Hits.Targets.IsBot(player) || player.IsYourPlayer || player.ActiveHealthController == null ||
                     player.ActiveHealthController.IsAlive || player.PlayerBones == null)
                 {
                     continue;
@@ -331,7 +332,7 @@ namespace RealTargets.Gore
                         parts.Add($"head {d:F2}/{reach:F2}{(blocked ? " blocked" : "")}");
                         if (d < reach && !blocked && Random.value < (d < 0.12f * scale ? 0.95f : 0.85f))
                         {
-                            DestroyHead(player, Away(at, head.Collider.bounds.center), 3000f, $"{name} at {d:F2} m", corpse: true);
+                            DestroyHead(player, Away(at, head.Collider.bounds.center), 3000f, Loc.F("why.blast", ("weapon", name), ("distance", d.ToString("F2"))), corpse: true);
                             done.Add("head destroyed");
                         }
                     }
@@ -355,7 +356,7 @@ namespace RealTargets.Gore
                         float near = 0.2f * scale;
                         float chance = d < near ? 0.95f : Mathf.Lerp(0.9f, 0.45f, (d - near) / Mathf.Max(range - near, 0.01f));
                         if (Random.value >= chance) continue;
-                        if (Sever(player, type, Away(at, bpc.Collider.bounds.center) * Mathf.Lerp(8f, 3f, d / range), $"{name} at {d:F2} m", corpse: true))
+                        if (Sever(player, type, Away(at, bpc.Collider.bounds.center) * Mathf.Lerp(8f, 3f, d / range), Loc.F("why.blast", ("weapon", name), ("distance", d.ToString("F2"))), corpse: true))
                         {
                             severed++;
                             done.Add($"{type} severed");
@@ -479,14 +480,14 @@ namespace RealTargets.Gore
                 var drops = BloodParticles.Instance;
                 drops?.Emit(centre, dir * 10f, 30f, 70, 0.012f);
                 drops?.Emit(centre, (dir + up).normalized * 6f, 60f, 35, 0.01f);
-                // From the neck too: the first gush out of the cut vessels.
-                drops?.Emit(stumpAt, up * 3f, 35f, 25, 0.011f);
+                // From the neck too: the first gush out of the cut vessels (carotids: scarlet).
+                drops?.Emit(stumpAt, up * 3f, 35f, 25, 0.011f, BloodTone.Arterial);
                 Splash(centre, dir, 3.5f, 50, 0.3f, Random.Range(3, 6));
             }
 
             Plugin.Log.LogInfo($"[Gore] {player.Profile?.Nickname}: head destroyed ({why}){(corpse ? " [corpse]" : " [killing shot]")}: " +
                                $"{cutNote}, cut {Along(Vector3.Dot(stumpAt - head.position, up), "above", "below")} the head pivot ({cutMs:F1} ms)");
-            RaiseGore(player, "Head destroyed", why);
+            RaiseGore(player, Loc.T("gore.head_destroyed"), why);
         }
 
         /// <summary>The helmet flies off: a visual clone of its renderers with physics (the real model is EFT's).</summary>
@@ -771,7 +772,7 @@ namespace RealTargets.Gore
 
             Plugin.Log.LogInfo($"[Gore] {player.Profile?.Nickname}: skull burst ({why}){(corpse ? " [corpse]" : " [killing shot]")}: exit from {exitFrom}, " +
                                $"r {radius * 100f:F1} cm, {removed} triangles out of {cutSkins} skin(s), crater rim {rim} edges, head moved {headMoved * 100f:F1} cm since the shot");
-            RaiseGore(player, "Skull burst open", why);
+            RaiseGore(player, Loc.T("gore.skull_burst"), why);
         }
 
         /// <summary>Every skin (all LODs) with vertices skinned to the head bone or below it, baked to world now.</summary>
@@ -1085,7 +1086,7 @@ namespace RealTargets.Gore
             Plugin.Log.LogInfo($"[Gore] {player.Profile?.Nickname}: {type} severed ({why}){(corpse ? " [corpse]" : " [killing shot]")}: " +
                                $"{group.Count} bone(s) collapsed, piece {triangles} triangles, {cutNote}, " +
                                $"cut {Along(Vector3.Dot(cutAt - proximal, axis), "past", "on the body side of")} the joint ({cutMs:F1} ms)");
-            RaiseGore(player, $"{Autopsy.AutopsyText.Collider(type, true)} severed", why);
+            RaiseGore(player, Loc.Capital(Loc.F("gore.severed", ("place", Autopsy.AutopsyText.Collider(type)))), why);
             return true;
         }
 

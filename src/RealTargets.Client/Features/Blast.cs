@@ -41,6 +41,7 @@ namespace RealTargets.Features
             [PatchPrefix]
             private static void Prefix(IExplosiveItem grenadeItem, Vector3 explosionPosition)
             {
+                if (Compat.Fika.IsHeadless) return;
                 try
                 {
                     Before.Clear();
@@ -59,6 +60,7 @@ namespace RealTargets.Features
             [PatchPostfix]
             private static void Postfix(IExplosiveItem grenadeItem, Vector3 explosionPosition, string playerProfileIDWhoThrew)
             {
+                if (Compat.Fika.IsHeadless) return;
                 try
                 {
                     if (Before.Count > 0) RecordBlastDamage(grenadeItem, explosionPosition, playerProfileIDWhoThrew);
@@ -90,6 +92,9 @@ namespace RealTargets.Features
         // Player.ApplyDamageInfo, decompiled 2026-10-18) never goes through ApplyShot, so a bot killed by the wave alone had
         // no row. It is applied synchronously inside Explosion, to living players only; the fragments are only queued
         // there (BallisticsCalculator.Shots, flown next update). So health before vs after Explosion = the blast alone.
+        // Every living player near it, not only bots (fika-2, Stompa's T1 raid: shooting an explosive gas canister killed
+        // him and his own autopsy had no row): yours goes to AutopsyRecords.Local, a teammate's to his body's record.
+        // Under Fika a body this machine doesn't own gets its health later by sync, so its diff here is 0 (no row).
 
         private static readonly EBodyPart[] Parts =
         {
@@ -105,7 +110,7 @@ namespace RealTargets.Features
             float range = Mathf.Max(grenadeItem.MaxExplosionDistance * 2f, 10f);
             foreach (var player in Singleton<GameWorld>.Instance.AllAlivePlayersList)
             {
-                if (player == null || !player.IsAI || player.IsYourPlayer || player.HealthController == null || !player.HealthController.IsAlive) continue;
+                if (player == null || player.HealthController == null || !player.HealthController.IsAlive) continue;
                 if ((player.Position - at).sqrMagnitude > range * range) continue;
                 var hp = new float[Parts.Length];
                 for (int i = 0; i < Parts.Length; i++) hp[i] = player.HealthController.GetBodyPartHealth(Parts[i], true).Current;
@@ -145,8 +150,8 @@ namespace RealTargets.Features
                 {
                     Target = player,
                     TargetName = player.Profile?.Nickname ?? "?",
-                    IsAI = player.IsAI,
-                    IsLocalPlayer = false,
+                    IsAI = Hits.Targets.IsBot(player),
+                    IsLocalPlayer = player.IsYourPlayer,
                     IsBlast = true,
                     DamageType = EDamageType.Explosion,
                     Weapon = ItemOf(grenadeItem),
@@ -184,8 +189,10 @@ namespace RealTargets.Features
                 }
                 if (Plugin.LogBlood.Value)
                 {
-                    Plugin.Log.LogInfo($"[Blast] {name} {hit.TargetName}: blast damage {total:F0} HP at {d:F1} m (~{hit.BlastKpa:F0} kPa)" +
-                                       $"{(alive ? "" : ", KILLED")}, thrower {(thrower != null ? thrower.Profile?.Nickname : "unknown")}");
+                    // An unnamed explosive (a map object such as a gas canister): its type, to learn what EFT passes for it.
+                    string kind = name == "explosive" ? $" [{grenadeItem.GetType().Name}]" : "";
+                    Plugin.Log.LogInfo($"[Blast] {name}{kind} {hit.TargetName}{(player.IsYourPlayer ? " (YOU)" : "")}: blast damage {total:F0} HP " +
+                                       $"at {d:F1} m (~{hit.BlastKpa:F0} kPa){(alive ? "" : ", KILLED")}, thrower {(thrower != null ? thrower.Profile?.Nickname : "unknown")}");
                 }
                 Autopsy.AutopsyRecords.OnBlast(hit);
             }

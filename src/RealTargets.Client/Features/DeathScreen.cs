@@ -11,6 +11,7 @@ using HarmonyLib;
 using RealTargets.Autopsy;
 using RealTargets.Gore;
 using RealTargets.Hits;
+using RealTargets.Localization;
 using SPT.Reflection.Patching;
 using UnityEngine;
 
@@ -156,7 +157,8 @@ namespace RealTargets.Features
                         colliders.TryGetValue(c, out var bpc) && bpc?.TransformCached != null)
                     {
                         // A volley is published 50 ms+ after its hits: one you were alive for can arrive after your death.
-                        string what = $"{AutopsyText.Collider(c, true)} severed", limbWhy = $"{p.AmmoName} {path.Energy:F0} J";
+                        string what = Loc.Capital(Loc.F("gore.severed", ("place", AutopsyText.Collider(c)))),
+                            limbWhy = Loc.F("why.energy", ("ammo", p.AmmoName), ("energy", path.Energy.ToString("F0")));
                         if (alive && !_died) HeavyLimbHits.Add((bpc.TransformCached.name, Time.time, what, limbWhy));
                         else Sever(bpc.TransformCached.name, what, limbWhy);
                     }
@@ -167,19 +169,19 @@ namespace RealTargets.Features
                     // The same rules and reasons as Dismemberment.TryHead (the autopsy's GORE lines).
                     string why = null;
                     if (single && calibre >= 12f && !Dismemberment.PistolCalibre(p.Caliber) && path.Energy >= Plugin.HeadLargeCalibreEnergy.Value)
-                        why = $"{p.AmmoName} {calibre:F1} mm, {path.Energy:F0} J";
+                        why = Loc.F("why.calibre", ("ammo", p.AmmoName), ("calibre", calibre.ToString("F1")), ("energy", path.Energy.ToString("F0")));
                     else if (path.Energy >= Plugin.HeadAnyEnergy.Value)
-                        why = $"{p.AmmoName} {path.Energy:F0} J";
+                        why = Loc.F("why.energy", ("ammo", p.AmmoName), ("energy", path.Energy.ToString("F0")));
                     else if (!single && pellets >= Plugin.HeadPellets.Value && p.Distance <= Plugin.ShotgunRange.Value)
-                        why = $"{pellets} pellets ({p.AmmoName}) at {p.Distance:F1} m";
+                        why = Loc.F("why.pellets", ("pellets", pellets), ("ammo", p.AmmoName), ("distance", p.Distance.ToString("F1")));
                     if (why != null)
                     {
                         _headGone = true;
-                        AutopsyRecords.NoteLocalGore("Head destroyed", why);
+                        AutopsyRecords.NoteLocalGore(Loc.T("gore.head_destroyed"), why);
                     }
                     else if (single && path.Energy >= Plugin.SkullBurstEnergy.Value && colliders.TryGetValue(c, out var head) && head?.TransformCached != null)
                     {
-                        AutopsyRecords.NoteLocalGore("Skull burst open", $"{p.AmmoName} {path.Energy:F0} J");
+                        AutopsyRecords.NoteLocalGore(Loc.T("gore.skull_burst"), Loc.F("why.energy", ("ammo", p.AmmoName), ("energy", path.Energy.ToString("F0"))));
                         var bone = head.TransformCached;
                         var exit = path.Exited ? path.End : path.Start + path.Direction * 0.12f;
                         Marks.Add(new Mark
@@ -371,19 +373,27 @@ namespace RealTargets.Features
                         continue;
                     }
                     PatchKind kind;
-                    float size;
+                    float size, aspect = 1f;
+                    int cell;
+                    Vector3? along = null;
+                    var normal = Vector3.Dot(hit.normal, dir) > 0f == !m.Exit ? -hit.normal : hit.normal;
                     if (m.Exit)
                     {
-                        kind = PatchKind.Exit;
-                        size = m.Size / (2f * 0.30f) * (m.Burst ? 2.2f : 1f);
+                        // Same shapes as the bots' (1.2.0 WoundTextures): skin exit by energy, fabric exit tear.
+                        bool skin = WoundDecals.EntryKindFor(part.Source.name, MaterialAt(part, hit.triangleIndex), false) == PatchKind.Entry;
+                        kind = skin ? PatchKind.Exit : PatchKind.Puncture;
+                        cell = skin ? WoundTextures.ExitCell(m.Energy, m.Burst) : WoundTextures.PunctureCell(true);
+                        size = m.Size * (skin ? 1f : 1.35f) / (2f * (skin ? WoundTextures.ExitReach : WoundTextures.PunctureTear)) * (m.Burst ? 2.2f : 1f);
                     }
                     else
                     {
                         kind = WoundDecals.EntryKindFor(part.Source.name, MaterialAt(part, hit.triangleIndex), m.Armour);
-                        size = kind == PatchKind.Entry ? m.Size / (2f * 0.18f) : m.Size / (2f * 0.16f);
+                        aspect = WoundTextures.EntryAspect(dir, normal);
+                        along = dir;
+                        cell = kind == PatchKind.Entry ? WoundTextures.EntryCell(false, (m.Size * 1000f - 3f) / 1.1f, aspect) : WoundTextures.PunctureCell(false);
+                        size = kind == PatchKind.Entry ? m.Size / (2f * WoundTextures.EntryOuter) : m.Size / (2f * WoundTextures.PunctureHole);
                     }
-                    var normal = Vector3.Dot(hit.normal, dir) > 0f == !m.Exit ? -hit.normal : hit.normal;
-                    if (Patch(parts, bone, hit.point, normal, size, kind, null, layer, decals)) wounds++;
+                    if (Patch(parts, bone, hit.point, normal, size, kind, along, layer, decals, cell, aspect)) wounds++;
 
                     // The blood that ran from it down the clothes, in the model's standing pose.
                     var down = Vector3.ProjectOnPlane(Vector3.down, normal);
@@ -392,7 +402,7 @@ namespace RealTargets.Features
                     float stain = Mathf.Clamp(0.06f + m.Energy / 40000f, 0.06f, 0.16f) * (m.Burst ? 1.4f : 1f);
                     var below = hit.point + down * (stain * 0.35f);
                     if (Cast(parts, below + normal * 0.04f, -normal, 0.08f, out var on, out _) &&
-                        Patch(parts, bone, on.point, normal, stain, PatchKind.Stain, down, layer, decals))
+                        Patch(parts, bone, on.point, normal, stain, PatchKind.Stain, down, layer, decals, WoundTextures.StainCell(BloodTone.Venous, 1)))
                     {
                         stains++;
                     }
@@ -494,7 +504,7 @@ namespace RealTargets.Features
         /// below it, kept on <paramref name="bone"/> (the model stands still in its idle pose, so it needs no skinning).
         /// </summary>
         private bool Patch(List<Part> parts, Transform bone, Vector3 centre, Vector3 normal, float size, PatchKind kind, Vector3? axis,
-            int layer, WoundDecals decals)
+            int layer, WoundDecals decals, int cell = 0, float aspect = 1f)
         {
             if (decals == null) return false;
             var materials = decals.MaterialsFor(kind);
@@ -510,6 +520,8 @@ namespace RealTargets.Features
             t.Normalize();
             var b = Vector3.Cross(n, t);
             float half = size * UnityEngine.Random.Range(0.9f, 1.15f) * 0.5f;
+            float halfU = half * aspect;
+            var cellUvs = WoundTextures.CellUvs(cell, false, Grid);
             float lift = kind == PatchKind.Stain ? Lift : Lift + 0.0016f;
 
             var vertices = new Vector3[Grid * Grid];
@@ -521,7 +533,7 @@ namespace RealTargets.Features
                 for (int i = 0; i < Grid; i++)
                 {
                     int k = j * Grid + i;
-                    var flat = centre + t * ((i / (float)(Grid - 1) - 0.5f) * 2f * half) + b * ((j / (float)(Grid - 1) - 0.5f) * 2f * half);
+                    var flat = centre + t * ((i / (float)(Grid - 1) - 0.5f) * 2f * halfU) + b * ((j / (float)(Grid - 1) - 0.5f) * 2f * half);
                     Vector3 at = flat, up = n;
                     if (Cast(parts, flat + n * 0.04f, -n, 0.08f, out var h, out _))
                     {
@@ -530,7 +542,7 @@ namespace RealTargets.Features
                     }
                     vertices[k] = bone.InverseTransformPoint(at + up * lift);
                     normals[k] = bone.InverseTransformDirection(up);
-                    uvs[k] = new Vector2(i / (float)(Grid - 1), j / (float)(Grid - 1));
+                    uvs[k] = cellUvs[k];
                     colors[k] = new Color32(255, 255, 255, 255);
                 }
             }

@@ -25,6 +25,8 @@ namespace RealTargets.Gore
     internal sealed class BleedSite
     {
         public BleedKind Kind;
+        /// <summary>How oxygenated its blood looks (1.2.0): scarlet artery, frothy lung, dark venous.</summary>
+        public BloodTone Tone;
         public EBodyPart BodyPart;
         public EBodyPartColliderType Collider;
         public string Weapon;
@@ -52,8 +54,15 @@ namespace RealTargets.Gore
         public float Rate;
         /// <summary>Blood that has left through this site (ml): feeds its pool and body stains.</summary>
         public float Drained;
-        /// <summary>Stain steps laid on the body so far (blood running down from the wound).</summary>
+        /// <summary>Stain patches laid on the body so far by both runs (blood running down from the wound).</summary>
         public int Stains;
+        /// <summary>
+        /// blood-5: blood runs down from the entry and from the exit, each its own run (blood-4 test: a pistol exit stayed dry
+        /// while the entry ran; only the lower opening ran before).
+        /// </summary>
+        public readonly StainRun EntryRun = new StainRun(), ExitRun = new StainRun();
+        /// <summary>Same cartridge (all pellets of one shell share it): close pellets join one site (blood-5).</summary>
+        public string SourceId;
 
         public bool Spurts => Kind == BleedKind.Arterial && !Treated;
 
@@ -80,6 +89,23 @@ namespace RealTargets.Gore
     }
 
     /// <summary>
+    /// One stream of blood running down the clothing from an opening (blood-5, BleedVisuals.Stain): it extends a step at a
+    /// time, steps over one bad spot (a pocket edge, a seam), and once it ends keeps getting fed (wider, darker, a soak
+    /// spreading round the hole) while blood still flows. A run that ran off an edge (a jacket hem) drips from there.
+    /// </summary>
+    internal sealed class StainRun
+    {
+        public int Steps;
+        public int Misses;
+        public bool Done;
+        public bool OffEdge;
+        public int Fed;
+        /// <summary>The last patch laid, relative to the site's bone (where a run off an edge drips from).</summary>
+        public Vector3 LocalEnd;
+        public bool HasEnd;
+    }
+
+    /// <summary>
     /// Everything that bleeds on one body: its sites, the blood it has lost, and a visual heart:
     /// pressure and heart rate while alive, a few weakening (agonal) beats after death, then nothing,
     /// so wounds drain by gravity only.
@@ -100,12 +126,25 @@ namespace RealTargets.Gore
         public float PoolVolume;
         /// <summary>Pool radius shown now (m): follows PoolVolume as a ~1.5 mm film with a lag (blood spreads).</summary>
         public float PoolRadius;
+
+        // blood-5 (blood-4 test: a dragged corpse left a stepping-stone line of big round pools, a new one at every pause, each
+        // as big as the whole body's pool; a standing bleeder made no puddle at all): where the blood leaves the body now, and
+        // since when it has been still. PoolVolume counts only what ran out while still at this place.
+        public bool HasPlace;
+        /// <summary>Where the pool of this place started (m, world); moving 0.5 m away starts a new place and volume.</summary>
+        public Vector3 PlaceAnchor;
+        public Vector3 PlaceLast;
+        public float MovedAt;
+        /// <summary>Still for 1.5 s (under 15 cm/s: a standing bot sways while it aims): blood collects under it (a pool); moving, it drips and smears instead.</summary>
+        public bool Still => HasPlace && Time.time - MovedAt > 1.5f;
         /// <summary>Game time of death (EFT's), -1 while alive.</summary>
         public float DiedAt = -1f;
         public float PressureAtDeath = 1f;
         public float HeartRateAtDeath = 90f;
         /// <summary>0..1: blood in the airway (chest wounds): coughed while alive, dribbles when dead.</summary>
         public float MouthBlood;
+        /// <summary>Airway blood from a lung wound is bright and frothy; from the face/skull darker (1.2.0).</summary>
+        public BloodTone MouthTone;
         public bool DrainStarted;
         public bool DrainDone;
         /// <summary>The projectile that killed it (phase 2: head destruction decides from this).</summary>

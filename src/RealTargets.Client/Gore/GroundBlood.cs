@@ -36,10 +36,7 @@ namespace RealTargets.Gore
         private const int MaxChunks = 48;
         private const float Cell = 0.035f;
         private const int MaxPools = 96;
-        private const int PoolGrid = 9;
-        private const int PoolVariants = 4;
         private const float Lift = 0.008f;
-        private const float PoolLift = 0.006f;
 
         internal static GroundBlood Instance { get; private set; }
         internal int ChunkCount => _chunks.Count;
@@ -62,6 +59,7 @@ namespace RealTargets.Gore
             public int Atlas;
             public bool Mirror;
             public long Key;
+            public BloodTone Tone;
             public byte Alpha;
             /// <summary>Light level where it landed (vertex RGB): scales the colour pass, never glows in the dark.</summary>
             public byte Light;
@@ -71,7 +69,8 @@ namespace RealTargets.Gore
         {
             public GameObject Go;
             public Mesh Mesh;
-            public long CellKey;
+            public (long cell, BloodTone tone) CellKey;
+            public BloodTone Tone;
             public Vector3 Centre;
             public Mark[] Marks = new Mark[QuadsPerChunk];
             /// <summary>Quads used; past QuadsPerChunk the oldest in this cell is reused (ring at Next).</summary>
@@ -86,35 +85,36 @@ namespace RealTargets.Gore
             public bool Dirty;
         }
 
-        private sealed class PoolPatch
-        {
-            public GameObject Go;
-            public Mesh Mesh;
-            public Vector3 Center, Normal, Axis;
-            public float Radius, Built;
-            /// <summary>Last time it grew: drying (darkening) starts a while after.</summary>
-            public float GrewAt;
-            public byte Dry;
-            public byte Light;
-            public int Variant;
-            public string Label;
-            public Color32[] Colors;
-        }
-
-        private readonly Dictionary<long, Chunk> _chunks = new Dictionary<long, Chunk>();
+        private readonly Dictionary<(long, BloodTone), Chunk> _chunks = new Dictionary<(long, BloodTone), Chunk>();
         private readonly Dictionary<long, (Chunk chunk, int slot)> _byCell = new Dictionary<long, (Chunk, int)>();
         private readonly MaterialPropertyBlock _block = new MaterialPropertyBlock();
 
-        private readonly Dictionary<object, PoolPatch> _pools = new Dictionary<object, PoolPatch>();
-        private float _nextDry;
-        private readonly Queue<PoolPatch> _allPools = new Queue<PoolPatch>();
+        private readonly Dictionary<object, BloodPool> _pools = new Dictionary<object, BloodPool>();
+        private readonly Queue<BloodPool> _allPools = new Queue<BloodPool>();
 
-        // Multiply (darken) and colour passes: lit (Lit mode, 0.10.3) or unlit (Hybrid). One pool
-        // material per texture variant (irregular outlines).
+        // Multiply (darken) and colour passes: lit (Lit mode, 0.10.3) or unlit (Hybrid). Pools (1.2.0): one material per
+        // pass, each pool's own field texture set per renderer.
         private Material _markMaterial, _markColour, _markLit;
-        private readonly Material[] _poolMaterial = new Material[PoolVariants], _poolColour = new Material[PoolVariants], _poolLit = new Material[PoolVariants];
+        private Material _poolMaterial, _poolColour, _poolLit;
+        /// <summary>blood-5: marks and pools on EFT's own shaders, per GroundShaderMode (0 wet, 1 matte), built on first use.</summary>
+        private readonly Material[] _markEft = new Material[2], _poolEft = new Material[2];
+        private readonly bool[] _eftTried = new bool[2];
+        private Texture2D _markTex;
         private int[] _chunkTriangles;
         private bool _failed;
+
+        /// <summary>perf-3 (dev split benchmark): every renderer drawing ground marks (chunks) or pools.</summary>
+        internal void CollectRenderers(List<Renderer> into)
+        {
+            foreach (var chunk in _chunks.Values)
+            {
+                if (chunk?.Go != null) into.Add(chunk.Go.GetComponent<Renderer>());
+            }
+            foreach (var pool in _allPools)
+            {
+                if (pool?.Go != null && pool.Renderer != null) into.Add(pool.Renderer);
+            }
+        }
 
         private void Awake()
         {
@@ -134,18 +134,15 @@ namespace RealTargets.Gore
             _chunks.Clear();
             _byCell.Clear();
 
-            while (_allPools.Count > 0) DestroyPool(_allPools.Dequeue());
+            while (_allPools.Count > 0) _allPools.Dequeue()?.Destroy();
             _pools.Clear();
         }
 
         private void LateUpdate()
         {
             using var perf = RealTargets.Diagnostics.Perf.Measure(RealTargets.Diagnostics.PerfArea.Ground);
-            if (Time.time >= _nextDry)
-            {
-                _nextDry = Time.time + 4f;
-                DryPools();
-            }
+            using (RealTargets.Diagnostics.Perf.Part(RealTargets.Diagnostics.PerfPart.PoolTick)) TickPools();
+            using var marks = RealTargets.Diagnostics.Perf.Part(RealTargets.Diagnostics.PerfPart.MarkUpload);
 
             foreach (var chunk in _chunks.Values)
             {
@@ -164,18 +161,41 @@ namespace RealTargets.Gore
         // ---- Marks -------------------------------------------------------------------------------
 
         /// <summary>A drop landing slowly on a floor: a round drip mark, merged with one already there.</summary>
-        internal void Drip(Vector3 point, Vector3 normal)
+        internal void Drip(Vector3 point, Vector3 normal, BloodTone tone = BloodTone.Venous)
         {
             if (!Ready()) return;
 
             long key = Key(point);
-            if (_byCell.TryGetValue(key, out var at) && at.chunk.Go != null && at.chunk.Marks[at.slot].Key == key)
+            // blood-3 (a standing bleeder left a confetti of separate drops): a drop within ~7 cm of a drip spot joins it.
+            if (NearDrip(point, out var at))
             {
-                // Blood keeps landing on the same spot: the spot spreads and darkens.
+                // Blood keeps landing on the same spot: the spot spreads and darkens. blood-2: one mark scaled up to 11 cm stayed a
+                // perfect disc; past 5.5 cm it stops growing and the puddle grows lumps (overlapping drops beside it) instead.
                 ref var m = ref at.chunk.Marks[at.slot];
-                m.Size = Mathf.Min(m.Size * 1.07f + 0.0015f, 0.11f);
                 m.Alpha = (byte)Mathf.Min(255, m.Alpha + 12);
+                if (m.Size < 0.055f)
+                {
+                    m.Size = Mathf.Min(m.Size * 1.07f + 0.0015f, 0.055f);
+                    Write(at.chunk, at.slot);
+                    return;
+                }
                 Write(at.chunk, at.slot);
+                if (Random.value > 0.35f) return;
+                var lump = Random.insideUnitCircle.normalized * (m.Size * Random.Range(0.45f, 0.8f));
+                var side = Vector3.Cross(m.Normal, m.Axis);
+                Add(new Mark
+                {
+                    Point = m.Point + m.Axis * lump.x + side * lump.y,
+                    Normal = m.Normal,
+                    Axis = RandomTangent(m.Normal),
+                    Size = m.Size * Random.Range(0.55f, 0.9f),
+                    Stretch = Random.Range(1f, 1.4f),
+                    Atlas = Random.value < 0.5f ? 0 : 1,
+                    Key = long.MinValue,
+                    Tone = m.Tone,
+                    Alpha = m.Alpha,
+                    Light = m.Light,
+                });
                 return;
             }
 
@@ -188,13 +208,58 @@ namespace RealTargets.Gore
                 Stretch = 1f,
                 Atlas = Random.value < 0.5f ? 0 : 1,
                 Key = key,
+                Tone = tone,
                 Alpha = (byte)Random.Range(170, 225),
                 Light = LightAt(point, normal),
             });
         }
 
+        /// <summary>A fine-spray droplet (cough, the fine part of an exit spray): a 4-12 mm speckle, a little stretched along its travel.</summary>
+        internal void Speckle(Vector3 point, Vector3 normal, Vector3 velocity, BloodTone tone)
+        {
+            if (!Ready()) return;
+            normal = normal.normalized;
+            var along = Vector3.ProjectOnPlane(velocity, normal);
+            float speed = along.magnitude;
+            Add(new Mark
+            {
+                Point = point,
+                Normal = normal,
+                Axis = speed > 0.3f ? along / speed : RandomTangent(normal),
+                Size = Random.Range(0.004f, 0.012f),
+                Stretch = Mathf.Clamp(1f + speed * 0.12f, 1f, 1.6f),
+                Atlas = Random.value < 0.5f ? 0 : 1,
+                Key = long.MinValue,
+                Tone = tone,
+                Alpha = (byte)Random.Range(180, 240),
+                Light = LightAt(point, normal),
+            });
+        }
+
+        /// <summary>
+        /// A keyed drip mark within ~10 cm of <paramref name="point"/> (the 5x5 cells around it, same height cell; blood-5: was
+        /// 3x3, ~5 cm, while a swaying bleeder's drops land over 10-20 cm).
+        /// </summary>
+        private bool NearDrip(Vector3 point, out (Chunk chunk, int slot) found)
+        {
+            for (int dz = -2; dz <= 2; dz++)
+            {
+                for (int dx = -2; dx <= 2; dx++)
+                {
+                    long key = Key(point + new Vector3(dx * Cell, 0f, dz * Cell));
+                    if (_byCell.TryGetValue(key, out var at) && at.chunk.Go != null && at.chunk.Marks[at.slot].Key == key)
+                    {
+                        found = at;
+                        return true;
+                    }
+                }
+            }
+            found = default;
+            return false;
+        }
+
         /// <summary>A droplet arriving with sideways speed (spurt) or hitting a wall: a splat stretched along its travel.</summary>
-        internal void Splat(Vector3 point, Vector3 normal, Vector3 velocity)
+        internal void Splat(Vector3 point, Vector3 normal, Vector3 velocity, BloodTone tone = BloodTone.Venous)
         {
             if (!Ready()) return;
 
@@ -210,6 +275,7 @@ namespace RealTargets.Gore
                 Stretch = Mathf.Clamp(1f + speed * 0.35f, 1f, 2.8f),
                 Atlas = speed > 0.3f ? 2 : 3,
                 Key = long.MinValue,
+                Tone = tone,
                 Alpha = (byte)Random.Range(180, 240),
                 Light = LightAt(point, normal),
             });
@@ -317,6 +383,8 @@ namespace RealTargets.Gore
                 Normal = normal,
                 Axis = axis.normalized,
                 Size = width,
+                // blood-5b (Stompa: the 1.1.0 drag trail "looked more realistic"): the 1.1.0 step again (2 widths long, DragSmears
+                // lays one every width), only the colours stay on the blood-2 palette.
                 Stretch = 2f,
                 Atlas = wetness > 0.45f ? 8 : 9,
                 // Mirrored across at random: the same cell every half length would show its pattern repeating.
@@ -357,12 +425,8 @@ namespace RealTargets.Gore
             float best = 0f;
             foreach (var pool in _allPools)
             {
-                if (pool?.Go == null || pool.Radius < 0.08f || pool.Dry > 230) continue;
-                var d = point - pool.Center;
-                if (Mathf.Abs(d.y) > 0.35f) continue;
-                d.y = 0f;
-                if (d.sqrMagnitude > pool.Radius * pool.Radius * 0.81f) continue;
-                best = Mathf.Max(best, 1f - pool.Dry / 255f * 0.85f);
+                if (pool?.Go == null || pool.Dry > 230) continue;
+                best = Mathf.Max(best, pool.WetnessAt(point));
             }
             return best;
         }
@@ -396,6 +460,7 @@ namespace RealTargets.Gore
             int before = _allPools.Count;
             Pool(new object(), "render test", spot, 0.5f);
             parts.Add(_allPools.Count > before ? "pool 50 cm, 1.5 m ahead" : "no floor found for the pool");
+            LogDecalsAround(spot);
 
             // 0.10.3: gore pieces (stump cap, gibs) 1 m to the right of the pool, to judge their lit look.
             var side = spot + Vector3.ProjectOnPlane(camera.right, Vector3.up).normalized * 1f;
@@ -411,9 +476,42 @@ namespace RealTargets.Gore
             return result;
         }
 
+        /// <summary>
+        /// blood-1 diagnosis: what the floor under <paramref name="spot"/> is drawn with, and every renderer within 2 m whose
+        /// shader or material says decal (shader, render queue, layer): tells whether map decals draw after our pools.
+        /// </summary>
+        private static void LogDecalsAround(Vector3 spot)
+        {
+            try
+            {
+                if (Physics.Raycast(spot + Vector3.up * 0.4f, Vector3.down, out var hit, 2.5f, LayersMaskController.HighPolyWithTerrainMask))
+                {
+                    var floor = hit.collider.GetComponent<Renderer>() ?? hit.collider.GetComponentInParent<Renderer>();
+                    var m = floor != null ? floor.sharedMaterial : null;
+                    Plugin.Log.LogInfo($"[Blood test] floor {hit.collider.name}: {(m != null ? $"{m.name}, shader {m.shader?.name}, queue {m.renderQueue}" : "no renderer")}");
+                }
+                int n = 0;
+                foreach (var r in FindObjectsOfType<Renderer>())
+                {
+                    if (r == null || !r.enabled || (r.bounds.ClosestPoint(spot) - spot).sqrMagnitude > 4f) continue;
+                    var m = r.sharedMaterial;
+                    string shader = m != null && m.shader != null ? m.shader.name : "?";
+                    if (shader.IndexOf("decal", System.StringComparison.OrdinalIgnoreCase) < 0 &&
+                        (m == null || m.name.IndexOf("decal", System.StringComparison.OrdinalIgnoreCase) < 0)) continue;
+                    Plugin.Log.LogInfo($"[Blood test] decal near: {r.name} ({r.GetType().Name}) shader {shader}, queue {m?.renderQueue}, layer {LayerMask.LayerToName(r.gameObject.layer)}");
+                    if (++n >= 15) break;
+                }
+                Plugin.Log.LogInfo($"[Blood test] {n} decal renderer(s) within 2 m; our pools/marks queue {(Instance?._poolLit != null ? Instance._poolLit.renderQueue : -1)}");
+            }
+            catch (System.Exception ex)
+            {
+                Plugin.Log.LogWarning($"[Blood test] decal scan: {ex.Message}");
+            }
+        }
+
         private void Add(Mark mark)
         {
-            var chunk = GetChunk(mark.Point);
+            var chunk = GetChunk(mark.Point, mark.Tone);
             if (chunk == null) return;
             int slot;
             if (chunk.Count < QuadsPerChunk)
@@ -474,9 +572,9 @@ namespace RealTargets.Gore
         }
 
         /// <summary>The chunk for the 6 m cell around <paramref name="point"/>; past MaxChunks the least recently used cell is cleared.</summary>
-        private Chunk GetChunk(Vector3 point)
+        private Chunk GetChunk(Vector3 point, BloodTone tone)
         {
-            long key = ChunkKey(point);
+            var key = (ChunkKey(point), tone);
             if (_chunks.TryGetValue(key, out var chunk) && chunk.Go != null) return chunk;
 
             if (_chunks.Count >= MaxChunks)
@@ -496,6 +594,7 @@ namespace RealTargets.Gore
             chunk = new Chunk
             {
                 CellKey = key,
+                Tone = tone,
                 Centre = new Vector3((Mathf.Floor(point.x / ChunkCell) + 0.5f) * ChunkCell, (Mathf.Floor(point.y / ChunkCell) + 0.5f) * ChunkCell,
                     (Mathf.Floor(point.z / ChunkCell) + 0.5f) * ChunkCell),
                 LastUse = Time.time,
@@ -513,10 +612,22 @@ namespace RealTargets.Gore
             DontDestroyOnLoad(chunk.Go);
             chunk.Go.AddComponent<MeshFilter>().sharedMesh = chunk.Mesh;
             var renderer = chunk.Go.AddComponent<MeshRenderer>();
-            renderer.sharedMaterials = Materials(false, 0);
+            renderer.sharedMaterials = Materials(false);
             Shade(renderer);
+            TintChunk(chunk);
             _chunks[key] = chunk;
             return chunk;
+        }
+
+        /// <summary>Lit marks of a brighter tone (artery, lung): the venous atlas tinted per chunk (1.2.0).</summary>
+        private void TintChunk(Chunk chunk)
+        {
+            if (chunk.Tone == BloodTone.Venous || chunk.Go == null || Plugin.DecalShader.Value != DecalShaderMode.Lit) return; // venous: the material colour
+            var r = chunk.Go.GetComponent<Renderer>();
+            if (r == null) return;
+            var tint = LitBlood.Scaled(BloodPalette.MarkTint(chunk.Tone), LitBlood.GroundSurface);
+            tint.a = MarkTint.a;
+            LitBlood.SetColor(r, r.sharedMaterials.Length - 1, tint, _block);
         }
 
         private void DestroyChunk(Chunk chunk)
@@ -570,17 +681,35 @@ namespace RealTargets.Gore
 
         // ---- Pools -------------------------------------------------------------------------------
 
-        /// <summary>Grows the wound's pool under <paramref name="site"/> to the given radius (m).</summary>
-        internal void Pool(object wound, string label, Vector3 site, float radius)
+        /// <summary>Grows the wound's pool under <paramref name="site"/> to the given radius (m), venous, one source.</summary>
+        internal void Pool(object wound, string label, Vector3 site, float radius) =>
+            Pool(wound, label, site, radius, 0f, null);
+
+        /// <summary>
+        /// The body's pool (1.2.0, <see cref="BloodPool"/>): wet area = pi r^2 for <paramref name="radius"/>, spreading from
+        /// <paramref name="sources"/> (the openings blood runs from; null = <paramref name="site"/>), as scarlet as
+        /// <paramref name="oxygen"/> (0 venous .. 1 arterial) while fresh. The edge moves every frame (LateUpdate).
+        /// </summary>
+        internal void Pool(object wound, string label, Vector3 site, float radius, float oxygen, IList<Vector3> sources)
         {
             if (!Ready()) return;
+            using var part = RealTargets.Diagnostics.Perf.Part(RealTargets.Diagnostics.PerfPart.PoolFeed);
 
-            if (_pools.TryGetValue(wound, out var pool) && pool.Go != null)
+            if (_pools.TryGetValue(wound, out var pool) && pool != null)
             {
-                var off = Vector3.ProjectOnPlane(site - pool.Center, Vector3.up);
-                if (off.magnitude > 0.35f + pool.Radius * 0.5f)
+                if (pool.Go == null && pool.Mesh == null)
                 {
-                    pool = null; // body moved away: the old pool stays, a new one starts here
+                    // No floor here last time; try again once the body has moved.
+                    if ((site - pool.Center).sqrMagnitude < 0.3f * 0.3f) return;
+                    pool = null;
+                }
+                else
+                {
+                    var off = Vector3.ProjectOnPlane(site - pool.Center, Vector3.up);
+                    if (off.magnitude > 0.35f + pool.Radius * 0.5f && off.magnitude > 0.5f)
+                    {
+                        pool = null; // body moved away: the old pool stays, a new one starts here
+                    }
                 }
             }
             else
@@ -594,168 +723,94 @@ namespace RealTargets.Gore
                     Movable(ground.collider))
                 {
                     if (Plugin.LogBlood.Value) Plugin.Log.LogInfo($"[Pool] {label}: no floor under {site}");
-                    _pools[wound] = new PoolPatch { Center = site }; // don't retry every update
+                    _pools[wound] = new BloodPool { Center = site }; // don't retry every update
                     return;
                 }
-                pool = new PoolPatch
-                {
-                    Center = ground.point,
-                    Normal = ground.normal.y > 0.5f ? ground.normal.normalized : Vector3.up,
-                    Radius = 0f,
-                    Built = 0f,
-                    Label = label,
-                    Variant = Random.Range(0, PoolVariants),
-                };
-                pool.Light = LightAt(ground.point, pool.Normal);
-                pool.Axis = RandomTangent(pool.Normal);
+                pool = new BloodPool { Label = label, Oxygen = Mathf.Clamp01(oxygen) };
                 pool.Mesh = new Mesh { name = "RealTargetsBloodPool", hideFlags = HideFlags.HideAndDontSave };
                 pool.Mesh.MarkDynamic();
                 pool.Go = new GameObject("RealTargetsBloodPool");
                 pool.Go.AddComponent<MeshFilter>().sharedMesh = pool.Mesh;
-                var renderer = pool.Go.AddComponent<MeshRenderer>();
-                renderer.sharedMaterials = Materials(true, pool.Variant);
-                Shade(renderer);
+                pool.Renderer = pool.Go.AddComponent<MeshRenderer>();
+                pool.Renderer.sharedMaterials = Materials(true);
+                pool.Renderer.enabled = false;
+                Shade(pool.Renderer);
+                var normal = ground.normal.y > 0.5f ? ground.normal.normalized : Vector3.up;
+                var starts = new List<Vector3>();
+                if (sources != null) starts.AddRange(sources);
+                if (starts.Count == 0) starts.Add(site);
+                pool.Start(ground.point, normal, starts);
                 _pools[wound] = pool;
                 _allPools.Enqueue(pool);
-                while (_allPools.Count > MaxPools) DestroyPool(_allPools.Dequeue());
+                while (_allPools.Count > MaxPools) _allPools.Dequeue().Destroy();
+            }
+            else
+            {
+                pool.UpdateSources(sources);
+                // More oxygenated blood joining (a cut artery) shifts the fresh colour a little.
+                pool.Oxygen = Mathf.Max(pool.Oxygen * 0.98f, Mathf.Clamp01(oxygen));
             }
 
-            if (pool.Mesh == null) return;
-            if (radius > pool.Radius + 0.002f) pool.GrewAt = Time.time;
-            pool.Radius = Mathf.Max(pool.Radius, radius);
-            if (pool.Radius - pool.Built >= 0.008f || pool.Built == 0f)
+            pool.TargetArea = Mathf.Max(pool.TargetArea, Mathf.PI * radius * radius);
+
+            // blood-5c (HollywoodFX's splash beside our pool read real, ours a clean sticker): drops that fell round the body
+            // while it bled; a few small ones just past the edge each time the pool's radius grows another 8 cm (max 18).
+            float r = Mathf.Sqrt(pool.TargetArea / Mathf.PI);
+            if (pool.Go != null && pool.Satellites < 18 && r >= pool.NextSatellite)
             {
-                Build(pool);
+                pool.NextSatellite = r + 0.08f;
+                int n = Random.Range(2, 5);
+                for (int i = 0; i < n && pool.Satellites < 18; i++) Satellite(pool, r);
             }
         }
 
-        /// <summary>
-        /// Lays the pool's 9x9 grid on the floor. A grid cell with a corner off the floor (ledge, rubble,
-        /// nothing below) is left out of the mesh (0.10.3): the lit colour pass ignores vertex alpha, so a
-        /// faded-out corner would otherwise float.
-        /// </summary>
-        private void Build(PoolPatch pool)
+        /// <summary>One small drop on the floor just outside a pool of radius <paramref name="r"/> (m).</summary>
+        private void Satellite(BloodPool pool, float r)
         {
-            int n = PoolGrid;
-            var vertices = new Vector3[n * n];
-            var uvs = new Vector2[n * n];
-            var colors = new Color32[n * n];
-            var on = new bool[n * n];
-            var up = pool.Normal;
-            var t = pool.Axis;
-            var b = Vector3.Cross(up, t).normalized;
-            // The texture's blob fills ~80 % of the patch, so the patch is a bit larger than the pool.
-            float half = pool.Radius * 1.25f;
-            int visible = 0;
-
-            for (int j = 0; j < n; j++)
+            float a = Random.Range(0f, Mathf.PI * 2f);
+            float d = r * Random.Range(0.95f, 1.4f) + 0.02f;
+            var at = pool.Center + (pool.Axis * Mathf.Cos(a) + pool.Side * Mathf.Sin(a)) * d;
+            if (!Physics.Raycast(at + pool.Normal * 0.3f, -pool.Normal, out var hit, 0.6f, LayersMaskController.HighPolyWithTerrainMask) ||
+                Movable(hit.collider) || hit.normal.y < 0.6f) return;
+            pool.Satellites++;
+            float s = Random.value;
+            Add(new Mark
             {
-                for (int i = 0; i < n; i++)
-                {
-                    float u = i / (float)(n - 1), w = j / (float)(n - 1);
-                    var flat = pool.Center + t * ((u - 0.5f) * 2f * half) + b * ((w - 0.5f) * 2f * half);
-                    int k = j * n + i;
-                    uvs[k] = new Vector2(u, w);
-                    byte alpha = 255;
-                    var p = flat + up * PoolLift;
-                    if (Physics.Raycast(flat + Vector3.up * 0.2f, Vector3.down, out var hit, 0.45f, LayersMaskController.HighPolyWithTerrainMask))
-                    {
-                        float rise = Vector3.Dot(hit.point - pool.Center, up);
-                        // Blood doesn't climb onto rubble or run down past a ledge: fade out there.
-                        if (rise > 0.06f || rise < -0.12f) alpha = 0;
-                        p = hit.point + hit.normal * PoolLift;
-                    }
-                    else
-                    {
-                        alpha = 0;
-                    }
-                    vertices[k] = p;
-                    on[k] = alpha > 0;
-                    if (alpha > 0) visible++;
-                    colors[k] = new Color32(Scale(DryRed(pool.Dry), pool.Light), pool.Light, pool.Light, alpha);
-                }
-            }
-
-            var tris = new List<int>((n - 1) * (n - 1) * 6);
-            for (int j = 0; j < n - 1; j++)
-            {
-                for (int i = 0; i < n - 1; i++)
-                {
-                    int a = j * n + i;
-                    if (!on[a] || !on[a + 1] || !on[a + n] || !on[a + n + 1]) continue;
-                    tris.Add(a); tris.Add(a + 1); tris.Add(a + n);
-                    tris.Add(a + 1); tris.Add(a + n + 1); tris.Add(a + n);
-                }
-            }
-
-            pool.Mesh.Clear();
-            pool.Mesh.vertices = vertices;
-            pool.Mesh.uv = uvs;
-            pool.Mesh.colors32 = colors;
-            pool.Colors = colors;
-            pool.Mesh.SetTriangles(tris, 0);
-            pool.Mesh.RecalculateNormals();
-            pool.Mesh.RecalculateTangents();
-            pool.Mesh.RecalculateBounds();
-            if (pool.Built == 0f)
-            {
-                ShadePool(pool);
-                if (Plugin.LogBlood.Value)
-                {
-                    Plugin.Log.LogInfo($"[Pool] {pool.Label}: new at {pool.Center} r {pool.Radius * 100f:F0} cm, {visible}/{n * n} grid points on the floor, " +
-                                       $"{Plugin.DecalShader.Value}{(Plugin.DecalShader.Value == DecalShaderMode.Lit ? "" : $" light {pool.Light}")}, outline {pool.Variant}");
-                }
-            }
-            pool.Built = pool.Radius;
+                Point = hit.point,
+                Normal = hit.normal.normalized,
+                Axis = RandomTangent(hit.normal),
+                Size = 0.008f + 0.024f * s * s,
+                Stretch = Random.Range(1f, 1.3f),
+                Atlas = Random.value < 0.7f ? (Random.value < 0.5f ? 0 : 1) : 3,
+                Key = long.MinValue,
+                Tone = BloodTone.Venous,
+                Alpha = (byte)Random.Range(200, 240),
+                Light = LightAt(hit.point, hit.normal),
+            });
         }
 
-        private static byte Scale(byte value, byte light) => (byte)(value * light / 255);
-
-        /// <summary>
-        /// Blood dries from the edge in: ~30 s after a pool stops growing it starts to darken and
-        /// loses its red over ~5 min (the multiply factor's red channel falls; the lit colour darkens).
-        /// </summary>
-        private void DryPools()
+        /// <summary>Every pool: finished fields picked up, edges moved, colours re-baked as they clot and dry.</summary>
+        private void TickPools()
         {
-            float now = Time.time;
+            if (_allPools.Count == 0) return;
+            bool cutout = Plugin.DecalShader.Value == DecalShaderMode.Lit && LitBlood.IsCutout;
+            float dt = Time.deltaTime;
             foreach (var pool in _allPools)
             {
-                if (pool?.Mesh == null || pool.Colors == null) continue;
-                byte dry = (byte)Mathf.RoundToInt(255f * Mathf.Clamp01((now - pool.GrewAt - 30f) / 300f));
-                // Fresh blood on top (it grew again) makes it fresh again.
-                if (dry == pool.Dry || (Mathf.Abs(dry - pool.Dry) < 6 && dry != 0 && dry != 255)) continue;
-                pool.Dry = dry;
-                byte red = Scale(DryRed(dry), pool.Light);
-                for (int i = 0; i < pool.Colors.Length; i++) pool.Colors[i].r = red;
-                pool.Mesh.colors32 = pool.Colors;
-                ShadePool(pool);
+                if (pool?.Go == null) continue;
+                try
+                {
+                    pool.Tick(dt, cutout, _block);
+                }
+                catch (System.Exception ex)
+                {
+                    Plugin.Log.LogWarning($"[Pool] {pool.Label}: {ex.Message}");
+                    pool.Destroy();
+                }
             }
-        }
-
-        /// <summary>Multiply factor's red channel: fresh 255, dried ~140 (darker, browner).</summary>
-        private static byte DryRed(byte dry) => (byte)(255 - dry * 115 / 255);
-
-        /// <summary>Lit colour pass: fresh blood dark red and glossy; dried ~45 % darker, browner (per pool, property block).</summary>
-        private void ShadePool(PoolPatch pool)
-        {
-            var r = pool.Go != null ? pool.Go.GetComponent<Renderer>() : null;
-            if (r == null || Plugin.DecalShader.Value != DecalShaderMode.Lit || _poolLit[pool.Variant] == null) return;
-            float d = pool.Dry / 255f;
-            var c = Color.Lerp(PoolFresh, PoolDried, d);
-            LitBlood.SetColor(r, r.sharedMaterials.Length - 1, c, _block);
         }
 
         private static readonly Color MarkTint = new Color(1f, 1f, 1f, 0.9f);
-        // 0.10.6: ~10 % darker (0.10.5 test, Stompa: "maybe a tiny bit too bright" under the helmet light).
-        private static readonly Color PoolFresh = new Color(0.88f, 0.88f, 0.88f, 0.97f);
-        private static readonly Color PoolDried = new Color(0.5f, 0.4f, 0.36f, 0.97f);
-
-        private static void DestroyPool(PoolPatch pool)
-        {
-            if (pool == null) return;
-            if (pool.Go != null) Destroy(pool.Go);
-            if (pool.Mesh != null) Destroy(pool.Mesh);
-        }
 
         // ---- Resources ---------------------------------------------------------------------------
 
@@ -777,20 +832,16 @@ namespace RealTargets.Gore
             }
 
             var markTex = BloodTextures.MarkAtlas();
-            var poolTex = new Texture2D[PoolVariants];
-            for (int v = 0; v < PoolVariants; v++) poolTex[v] = BloodTextures.Pool(v);
+            _markTex = markTex;
             if (multiply != null && multiplyName.Contains("Multiply"))
             {
                 _markMaterial = new Material(multiply) { mainTexture = markTex, hideFlags = HideFlags.HideAndDontSave };
                 NoSoftFade(_markMaterial);
                 // Pools under marks: drips landing in a pool still show on top.
                 _markMaterial.renderQueue = 2992;
-                for (int v = 0; v < PoolVariants; v++)
-                {
-                    _poolMaterial[v] = new Material(multiply) { mainTexture = poolTex[v], hideFlags = HideFlags.HideAndDontSave };
-                    NoSoftFade(_poolMaterial[v]);
-                    _poolMaterial[v].renderQueue = 2990;
-                }
+                _poolMaterial = new Material(multiply) { hideFlags = HideFlags.HideAndDontSave };
+                NoSoftFade(_poolMaterial);
+                _poolMaterial.renderQueue = 2990;
             }
             if (blended != null && blendedName.Contains("Alpha Blended"))
             {
@@ -800,17 +851,17 @@ namespace RealTargets.Gore
                 _markColour.SetColor("_TintColor", tint);
                 NoSoftFade(_markColour);
                 _markColour.renderQueue = 2993;
-                for (int v = 0; v < PoolVariants; v++)
-                {
-                    _poolColour[v] = new Material(blended) { mainTexture = poolTex[v], hideFlags = HideFlags.HideAndDontSave };
-                    _poolColour[v].SetColor("_TintColor", tint);
-                    NoSoftFade(_poolColour[v]);
-                    _poolColour[v].renderQueue = 2991;
-                }
+                _poolColour = new Material(blended) { hideFlags = HideFlags.HideAndDontSave };
+                _poolColour.SetColor("_TintColor", tint);
+                NoSoftFade(_poolColour);
+                _poolColour.renderQueue = 2991;
             }
             // Lit colour pass (0.10.3): albedo = texture (dark red), lit by the map; pools glossy.
             _markLit = LitBlood.Transparent(markTex, MarkTint, 0.55f, 2993, "RealTargetsBloodMarksLit", 0.4f);
-            for (int v = 0; v < PoolVariants; v++) _poolLit[v] = LitBlood.Transparent(poolTex[v], PoolFresh, 0.85f, 2991, "RealTargetsBloodPoolLit", 0.4f);
+            LateOpaque(_markLit);
+            // Pools: colour and alpha (arrival time) come from each pool's own texture (BloodPool); the cutoff moves its edge.
+            _poolLit = LitBlood.Transparent(null, Color.white, 0.85f, 2991, "RealTargetsBloodPoolLit", 1.01f);
+            LateOpaque(_poolLit);
             ShaderName = $"{(_markMaterial != null ? multiplyName : "-")} + {(_markColour != null ? blendedName : "-")} + lit {LitBlood.TransparentName}";
 
             _chunkTriangles = new int[QuadsPerChunk * 6];
@@ -821,8 +872,36 @@ namespace RealTargets.Gore
                 _chunkTriangles[i + 3] = v; _chunkTriangles[i + 4] = v + 2; _chunkTriangles[i + 5] = v + 3;
             }
 
-            Plugin.Log.LogInfo($"Ground blood: shader {ShaderName}, mode {Plugin.DecalShader.Value}, {SoftParticleState()}");
+            EftMaterial(false);
+            EftMaterial(true);
+            Plugin.Log.LogInfo($"Ground blood: shader {ShaderName}, mode {Plugin.DecalShader.Value}, ground shader {Plugin.GroundShader.Value}" +
+                               $"{(LitBlood.GroundIsEft ? "" : " (not in use)")}, {SoftParticleState()}, colour space {QualitySettings.activeColorSpace}");
             return true;
+        }
+
+        /// <summary>The marks' or pools' material on EFT's shader for the picked GroundShaderMode; null = Stock or not found.</summary>
+        private Material EftMaterial(bool pool)
+        {
+            var mode = Plugin.GroundShader.Value;
+            if (mode == GroundShaderMode.Stock) return null;
+            int i = mode == GroundShaderMode.EftWet ? 0 : 1;
+            if (!_eftTried[i])
+            {
+                _eftTried[i] = true;
+                _markEft[i] = LitBlood.EftGround(mode, _markTex, MarkTint, "RealTargetsBloodMarksEft", 0.4f);
+                _poolEft[i] = LitBlood.EftGround(mode, null, Color.white, "RealTargetsBloodPoolEft", 1.01f);
+            }
+            return pool ? _poolEft[i] : _markEft[i];
+        }
+
+        /// <summary>
+        /// blood-1 test: the floor's grime and scratches showed ON our pools (torch on, or on gritty concrete): probably the
+        /// map's own decal meshes drawn after us in the deferred pass. A cutout material sits at AlphaTest (2450); 2500 is the
+        /// last queue the deferred pass still draws (shadows kept), so ours lands after decals queued in between. Test.
+        /// </summary>
+        private static void LateOpaque(Material m)
+        {
+            if (m != null && LitBlood.IsCutout) m.renderQueue = 2500;
         }
 
         /// <summary>
@@ -887,14 +966,16 @@ namespace RealTargets.Gore
         }
 
         /// <summary>Materials for marks or pools in the current `Decal shader` mode (falls back to what exists).</summary>
-        private Material[] Materials(bool pool, int variant)
+        private Material[] Materials(bool pool)
         {
-            var mul = pool ? _poolMaterial[variant] : _markMaterial;
-            var col = pool ? _poolColour[variant] : _markColour;
-            var lit = pool ? _poolLit[variant] : _markLit;
+            var mul = pool ? _poolMaterial : _markMaterial;
+            var col = pool ? _poolColour : _markColour;
+            var lit = pool ? _poolLit : _markLit;
             switch (Plugin.DecalShader.Value)
             {
                 case DecalShaderMode.Lit when lit != null:
+                    var eft = LitBlood.GroundIsEft ? EftMaterial(pool) : null;
+                    if (eft != null) return new[] { eft };
                     return mul != null && !LitBlood.IsCutout ? new[] { mul, lit } : new[] { lit };
                 case DecalShaderMode.Multiply when mul != null:
                     return new[] { mul };
@@ -916,17 +997,19 @@ namespace RealTargets.Gore
                 {
                     var r = chunk?.Go != null ? chunk.Go.GetComponent<Renderer>() : null;
                     if (r == null) continue;
-                    r.sharedMaterials = inst.Materials(false, 0);
+                    r.SetPropertyBlock(null);
+                    r.sharedMaterials = inst.Materials(false);
                     Shade(r);
+                    inst.TintChunk(chunk);
                 }
                 foreach (var pool in inst._allPools)
                 {
                     var r = pool?.Go != null ? pool.Go.GetComponent<Renderer>() : null;
                     if (r == null) continue;
                     r.SetPropertyBlock(null);
-                    r.sharedMaterials = inst.Materials(true, pool.Variant);
+                    r.sharedMaterials = inst.Materials(true);
                     Shade(r);
-                    inst.ShadePool(pool);
+                    pool.Reshade(inst._block);
                 }
             }
             WoundDecals.Instance?.Reshade();
@@ -943,8 +1026,9 @@ namespace RealTargets.Gore
     /// </summary>
     internal static class BloodTextures
     {
-        private static readonly Color Fresh = new Color(0.30f, 0.015f, 0.015f);
-        private static readonly Color Rim = new Color(0.40f, 0.03f, 0.025f);
+        // blood-1 (palette): drops and splats at venous film level, a slightly lighter thin rim (were 0.30 / 0.40: paint).
+        private static readonly Color Fresh = BloodPalette.VenousFilm;
+        private static readonly Color Rim = new Color(0.235f, 0.022f, 0.024f);
 
         /// <summary>4x2 atlas, 128 px cells. Row 0: 0/1 round drips with satellites, 2 directional splat (runs toward +U), 3 star splat. Row 1 (0.10.6): 4-6 boot prints wet/medium/faint (toe toward +U, right foot), 7 smear (runs toward +U).</summary>
         internal static Texture2D MarkAtlas()
@@ -977,8 +1061,8 @@ namespace RealTargets.Gore
                         float edge;
                         switch (c)
                         {
-                            case 0: edge = 0.22f + 0.025f * Mathf.Sin(a * 7f + 1f) + 0.015f * Mathf.Sin(a * 13f); break;
-                            case 1: edge = 0.19f + 0.04f * Mathf.Pow(Mathf.Abs(Mathf.Sin(a * 4f + 0.5f)), 4f); break;
+                            case 0: edge = 0.22f + 0.012f * Mathf.Sin(a * 7f + 1f) + 0.01f * Mathf.Sin(a * 3f) + 0.02f * (Mathf.PerlinNoise(x * 9f + 3f, y * 9f) - 0.5f); break;
+                            case 1: edge = 0.19f + 0.02f * Mathf.Sin(a * 3f + 0.5f) + 0.015f * Mathf.Sin(a * 5f) + 0.02f * (Mathf.PerlinNoise(x * 9f, y * 9f + 7f) - 0.5f); break;
                             case 2:
                             {
                                 // Teardrop: round head at -U, thinning tail toward +U.
@@ -989,7 +1073,8 @@ namespace RealTargets.Gore
                                 edge = 0.2f;
                                 break;
                             }
-                            default: edge = 0.16f + 0.09f * Mathf.Pow(Mathf.Abs(Mathf.Sin(a * 5f + 0.3f)), 6f); break;
+                            // blood-1: was a star (0.16 + 0.09 |sin 5a|^6); now an irregular splash, lobed, ragged.
+                            default: edge = 0.17f + 0.035f * Mathf.Sin(a * 2f + 0.3f) + 0.025f * Mathf.Sin(a * 3f + 2.1f) + 0.04f * (Mathf.PerlinNoise(x * 7f + 5f, y * 7f) - 0.5f); break;
                         }
                         float body = 1f - Smooth(edge - 0.015f, edge + 0.01f, r);
                         float dot = 0f;
@@ -1024,7 +1109,8 @@ namespace RealTargets.Gore
         /// </summary>
         private static void Footprints(Color[] pixels, int width, int cell)
         {
-            var colours = new[] { new Color(0.36f, 0.03f, 0.025f), new Color(0.36f, 0.05f, 0.035f), new Color(0.37f, 0.08f, 0.05f) };
+            // blood-1: on the palette (were 0.36-0.37 R: bright red stamps); a drying print browner.
+            var colours = new[] { new Color(0.2f, 0.018f, 0.021f), new Color(0.2f, 0.03f, 0.026f), new Color(0.19f, 0.045f, 0.034f) };
             for (int level = 0; level < 3; level++)
             {
                 int ox = level * cell, oy = cell;
@@ -1034,9 +1120,12 @@ namespace RealTargets.Gore
                     {
                         float x = (i + 0.5f) / cell - 0.5f, y = (j + 0.5f) / cell - 0.5f;
                         float rag = Mathf.PerlinNoise(x * 11f + level * 3.7f, y * 11f + 2.3f);
-                        if (!SoleLug(x, y, rag)) continue;
-
                         float smear = Mathf.PerlinNoise(x * 6f + 13f + level * 5f, y * 9f + 7f);
+                        // blood-1 (Stompa: "blocky"): lug edges broken up, and a wet print fills some grooves where blood pooled.
+                        bool lug = SoleLug(x, y, rag) && Mathf.PerlinNoise(x * 34f + level * 9f, y * 34f + 4f) > 0.27f;
+                        bool groove = !lug && level == 0 && SoleInside(x, y, rag) && smear > 0.6f;
+                        if (!lug && !groove) continue;
+
                         float pressure = Mathf.Max(Mathf.Exp(-(Sq(x - 0.2f) / 0.03f + Sq(y) / 0.07f)), Mathf.Exp(-(Sq(x + 0.33f) / 0.015f + Sq(y - 0.04f) / 0.05f)));
                         float a;
                         switch (level)
@@ -1046,11 +1135,24 @@ namespace RealTargets.Gore
                             default: a = smear * 0.5f + pressure * 0.6f - 0.35f; break;
                         }
                         var c = colours[level] * Mathf.Lerp(0.85f, 1.1f, smear);
+                        if (groove) a *= 0.85f;
                         c.a = Mathf.Clamp01(a);
                         pixels[(oy + j) * width + ox + i] = c;
                     }
                 }
             }
+        }
+
+        /// <summary>Inside the sole outline (lug or groove).</summary>
+        private static bool SoleInside(float x, float y, float rag)
+        {
+            float heelToArch = Smooth(-0.25f, -0.1f, x), archToBall = Smooth(0.0f, 0.15f, x);
+            float half = Mathf.Lerp(Mathf.Lerp(0.3f, 0.25f, heelToArch), 0.4f, archToBall);
+            float centre = Mathf.Lerp(Mathf.Lerp(0.03f, 0.1f, heelToArch), 0.02f, archToBall);
+            if (x < -0.38f) half *= Mathf.Sqrt(Mathf.Clamp01(1f - Sq((x + 0.38f) / 0.1f)));
+            if (x > 0.28f) half *= Mathf.Sqrt(Mathf.Clamp01(1f - Sq((x - 0.28f) / 0.19f)));
+            half *= 0.96f + 0.08f * rag;
+            return Mathf.Abs(y - centre) < half && x > -0.48f && x < 0.47f;
         }
 
         /// <summary>True where a lug of the generic military sole touches the ground (see Footprints).</summary>
@@ -1103,11 +1205,13 @@ namespace RealTargets.Gore
         /// along the drag (cloth pressed over the floor: noise stretched ~25x along U), soft ends so overlapping steps join
         /// into one trail. Drying: narrower, the stripes break into dashes with gaps. Darker than a fresh pool (a thin film
         /// over concrete). The mark's own alpha thins it further under the lit pass's cutout as the cloth runs dry.
+        /// blood-5b: back to this 1.1.0 shape (blood-3..5 tried a smooth capsule band; Stompa preferred the 1.1.0 look), with
+        /// the blood-2 colours.
         /// </summary>
         private static void DragStreaks(Color[] pixels, int width, int cell)
         {
-            var wetColour = new Color(0.24f, 0.012f, 0.012f);
-            var dryColour = new Color(0.22f, 0.035f, 0.022f);
+            var wetColour = new Color(0.165f, 0.013f, 0.016f);
+            var dryColour = new Color(0.15f, 0.036f, 0.026f);
             for (int level = 0; level < 2; level++)
             {
                 int ox = level * cell, oy = 2 * cell;
@@ -1117,7 +1221,8 @@ namespace RealTargets.Gore
                     for (int i = 0; i < cell; i++)
                     {
                         float x = (i + 0.5f) / cell - 0.5f, y = (j + 0.5f) / cell - 0.5f;
-                        // Even width with a ragged, slowly wandering edge on each side.
+                        // blood-5b (Stompa: the 1.1.0 trail on the promo card "looked more realistic" than blood-3..5's smooth
+                        // capsule band): the 1.1.0 (gore-5) cell again. Even width with a ragged, slowly wandering edge on each side.
                         float side = y >= 0f ? 1f : 0f;
                         float half = (dry ? 0.3f : 0.38f) + 0.05f * (Mathf.PerlinNoise(x * 3f + 4f + side * 7f, side * 3f) - 0.5f)
                                      + 0.035f * (Mathf.PerlinNoise(x * 22f + 11f, side * 5f + 1f) - 0.5f);
@@ -1169,61 +1274,6 @@ namespace RealTargets.Gore
             tex.SetPixels(pixels);
             tex.Apply(true, false);
             return tex;
-        }
-
-        /// <summary>
-        /// Pool outline <paramref name="variant"/> (0.10.3: four, picked at random per pool; 0.10.2's single
-        /// round-ish blob read as a stamped shape): a lobed blob filling ~80 % of the patch with random
-        /// harmonics, 1-3 tongues where blood ran along the floor, a darker centre and edge droplets.
-        /// </summary>
-        internal static Texture2D Pool(int variant)
-        {
-            const int size = 256;
-            var pixels = new Color[size * size];
-            var rng = new System.Random(1301 + variant * 7919);
-            float R() => (float)rng.NextDouble();
-            var freq = new float[4];
-            var amp = new float[4];
-            var phase = new float[4];
-            for (int h = 0; h < 4; h++)
-            {
-                freq[h] = 2 + rng.Next(h * 2 + 2);
-                amp[h] = (0.045f - h * 0.009f) * (0.5f + R());
-                phase[h] = R() * Mathf.PI * 2f;
-            }
-            int tongues = 1 + rng.Next(3);
-            var tongueAngle = new float[tongues];
-            var tongueLength = new float[tongues];
-            for (int q = 0; q < tongues; q++)
-            {
-                tongueAngle[q] = R() * Mathf.PI * 2f;
-                tongueLength[q] = 0.04f + 0.07f * R();
-            }
-            float nx = R() * 50f, ny = R() * 50f;
-            for (int j = 0; j < size; j++)
-            {
-                for (int i = 0; i < size; i++)
-                {
-                    float x = (i + 0.5f) / size - 0.5f, y = (j + 0.5f) / size - 0.5f;
-                    float a = Mathf.Atan2(y, x), r = Mathf.Sqrt(x * x + y * y);
-                    float edge = 0.32f + 0.03f * (Mathf.PerlinNoise(x * 7f + nx, y * 7f + ny) - 0.5f);
-                    for (int h = 0; h < 4; h++) edge += amp[h] * Mathf.Sin(a * freq[h] + phase[h]);
-                    for (int q = 0; q < tongues; q++)
-                    {
-                        float da = Mathf.DeltaAngle(a * Mathf.Rad2Deg, tongueAngle[q] * Mathf.Rad2Deg) * Mathf.Deg2Rad;
-                        edge += tongueLength[q] * Mathf.Exp(-da * da / 0.03f);
-                    }
-                    edge = Mathf.Min(edge, 0.46f);
-                    float body = 1f - Smooth(edge - 0.012f, edge + 0.006f, r);
-                    float speck = Mathf.PerlinNoise(x * 40f + 11f, y * 40f + 5f);
-                    float ring = r > edge && r < edge + 0.07f && speck > 0.74f ? Mathf.InverseLerp(0.74f, 0.8f, speck) : 0f;
-                    float depth = Mathf.Clamp01(1f - r / Mathf.Max(edge, 0.01f));
-                    var col = Color.Lerp(Rim, Fresh * 0.75f, Smooth(0f, 0.6f, depth));
-                    col.a = Mathf.Max(body * 0.97f, ring * 0.9f);
-                    pixels[j * size + i] = col;
-                }
-            }
-            return Make(size, pixels);
         }
 
         /// <summary>

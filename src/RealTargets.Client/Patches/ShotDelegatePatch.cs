@@ -23,6 +23,8 @@ namespace RealTargets.Patches
         {
             new BasePatch().Enable();
             new ClientPatch().Enable();
+            var fikaClient = Compat.Fika.ClientShotDelegate();
+            if (fikaClient != null) new FikaClientPatch(fikaClient).Enable();
         }
 
         private class BasePatch : ModulePatch
@@ -67,6 +69,20 @@ namespace RealTargets.Patches
 
             [PatchPrefix]
             private static void Prefix(Shot shotResult) => Begin(shotResult);
+
+            [PatchFinalizer]
+            private static void Finalizer() => Current = null;
+        }
+
+        /// <summary>Fika's FikaClientGameWorld overrides ShotDelegate without base (its host world inherits ours).</summary>
+        private class FikaClientPatch : ModulePatch
+        {
+            private readonly MethodBase _target;
+            public FikaClientPatch(MethodBase target) => _target = target;
+            protected override MethodBase GetTargetMethod() => _target;
+
+            [PatchPrefix]
+            private static void Prefix(Shot __0) => Begin(__0);
 
             [PatchFinalizer]
             private static void Finalizer() => Current = null;

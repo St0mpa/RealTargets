@@ -6,6 +6,7 @@ using EFT.HealthSystem;
 using EFT.InventoryLogic;
 using RealTargets.Gore;
 using RealTargets.Hits;
+using RealTargets.Localization;
 using UnityEngine;
 
 namespace RealTargets.Autopsy
@@ -540,11 +541,11 @@ namespace RealTargets.Autopsy
         {
             var from = -travel.normalized;
             float f = Vector3.Dot(from, frame.Forward), r = Vector3.Dot(from, frame.Right), u = Vector3.Dot(from, frame.Up);
-            if (u > 0.75f) return "from above";
-            if (u < -0.75f) return "from below";
-            if (f > 0.5f) return "from the front";
-            if (f < -0.5f) return "from behind";
-            return r > 0f ? "from the right side" : "from the left side";
+            if (u > 0.75f) return Loc.T("from.above");
+            if (u < -0.75f) return Loc.T("from.below");
+            if (f > 0.5f) return Loc.T("from.front");
+            if (f < -0.5f) return Loc.T("from.behind");
+            return r > 0f ? Loc.T("from.right") : Loc.T("from.left");
         }
 
         /// <summary>

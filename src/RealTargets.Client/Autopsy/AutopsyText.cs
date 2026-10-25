@@ -1,4 +1,5 @@
 using EFT;
+using RealTargets.Localization;
 
 namespace RealTargets.Autopsy
 {
@@ -7,13 +8,13 @@ namespace RealTargets.Autopsy
     {
         internal static string Part(EBodyPart part) => part switch
         {
-            EBodyPart.Head => "Head",
-            EBodyPart.Chest => "Thorax",
-            EBodyPart.Stomach => "Stomach",
-            EBodyPart.LeftArm => "Left arm",
-            EBodyPart.RightArm => "Right arm",
-            EBodyPart.LeftLeg => "Left leg",
-            EBodyPart.RightLeg => "Right leg",
+            EBodyPart.Head => Loc.T("part.Head"),
+            EBodyPart.Chest => Loc.T("part.Chest"),
+            EBodyPart.Stomach => Loc.T("part.Stomach"),
+            EBodyPart.LeftArm => Loc.T("part.LeftArm"),
+            EBodyPart.RightArm => Loc.T("part.RightArm"),
+            EBodyPart.LeftLeg => Loc.T("part.LeftLeg"),
+            EBodyPart.RightLeg => Loc.T("part.RightLeg"),
             _ => part.ToString(),
         };
 
@@ -22,32 +23,32 @@ namespace RealTargets.Autopsy
         {
             string s = collider switch
             {
-                EBodyPartColliderType.HeadCommon => "head",
-                EBodyPartColliderType.ParietalHead => "top of the head",
-                EBodyPartColliderType.BackHead => "back of the head",
-                EBodyPartColliderType.Ears => "ear",
-                EBodyPartColliderType.Eyes => "eyes",
-                EBodyPartColliderType.Jaw => "jaw",
-                EBodyPartColliderType.NeckFront => "throat",
-                EBodyPartColliderType.NeckBack => "back of the neck",
-                EBodyPartColliderType.RibcageUp => "upper chest",
-                EBodyPartColliderType.RibcageLow => "lower chest",
-                EBodyPartColliderType.SpineTop => "upper back",
-                EBodyPartColliderType.SpineDown => "lower back",
-                EBodyPartColliderType.RightSideChestUp => "right side (upper)",
-                EBodyPartColliderType.LeftSideChestUp => "left side (upper)",
-                EBodyPartColliderType.RightSideChestDown => "right side (lower)",
-                EBodyPartColliderType.LeftSideChestDown => "left side (lower)",
-                EBodyPartColliderType.Pelvis => "pelvis",
-                EBodyPartColliderType.PelvisBack => "buttocks",
-                EBodyPartColliderType.LeftUpperArm => "left upper arm",
-                EBodyPartColliderType.LeftForearm => "left forearm",
-                EBodyPartColliderType.RightUpperArm => "right upper arm",
-                EBodyPartColliderType.RightForearm => "right forearm",
-                EBodyPartColliderType.LeftThigh => "left thigh",
-                EBodyPartColliderType.LeftCalf => "left calf",
-                EBodyPartColliderType.RightThigh => "right thigh",
-                EBodyPartColliderType.RightCalf => "right calf",
+                EBodyPartColliderType.HeadCommon => Loc.T("place.HeadCommon"),
+                EBodyPartColliderType.ParietalHead => Loc.T("place.ParietalHead"),
+                EBodyPartColliderType.BackHead => Loc.T("place.BackHead"),
+                EBodyPartColliderType.Ears => Loc.T("place.Ears"),
+                EBodyPartColliderType.Eyes => Loc.T("place.Eyes"),
+                EBodyPartColliderType.Jaw => Loc.T("place.Jaw"),
+                EBodyPartColliderType.NeckFront => Loc.T("place.NeckFront"),
+                EBodyPartColliderType.NeckBack => Loc.T("place.NeckBack"),
+                EBodyPartColliderType.RibcageUp => Loc.T("place.RibcageUp"),
+                EBodyPartColliderType.RibcageLow => Loc.T("place.RibcageLow"),
+                EBodyPartColliderType.SpineTop => Loc.T("place.SpineTop"),
+                EBodyPartColliderType.SpineDown => Loc.T("place.SpineDown"),
+                EBodyPartColliderType.RightSideChestUp => Loc.T("place.RightSideChestUp"),
+                EBodyPartColliderType.LeftSideChestUp => Loc.T("place.LeftSideChestUp"),
+                EBodyPartColliderType.RightSideChestDown => Loc.T("place.RightSideChestDown"),
+                EBodyPartColliderType.LeftSideChestDown => Loc.T("place.LeftSideChestDown"),
+                EBodyPartColliderType.Pelvis => Loc.T("place.Pelvis"),
+                EBodyPartColliderType.PelvisBack => Loc.T("place.PelvisBack"),
+                EBodyPartColliderType.LeftUpperArm => Loc.T("place.LeftUpperArm"),
+                EBodyPartColliderType.LeftForearm => Loc.T("place.LeftForearm"),
+                EBodyPartColliderType.RightUpperArm => Loc.T("place.RightUpperArm"),
+                EBodyPartColliderType.RightForearm => Loc.T("place.RightForearm"),
+                EBodyPartColliderType.LeftThigh => Loc.T("place.LeftThigh"),
+                EBodyPartColliderType.LeftCalf => Loc.T("place.LeftCalf"),
+                EBodyPartColliderType.RightThigh => Loc.T("place.RightThigh"),
+                EBodyPartColliderType.RightCalf => Loc.T("place.RightCalf"),
                 _ => collider.ToString(),
             };
             return capital && s.Length > 0 ? char.ToUpperInvariant(s[0]) + s.Substring(1) : s;
@@ -72,25 +73,25 @@ namespace RealTargets.Autopsy
         /// <summary>"PMC USEC", "Scav", "Boss Killa", "Raider"...</summary>
         internal static string Role(EPlayerSide side, WildSpawnType role)
         {
-            if (side == EPlayerSide.Usec) return "PMC USEC";
-            if (side == EPlayerSide.Bear) return "PMC BEAR";
+            if (side == EPlayerSide.Usec) return Loc.T("role.usec");
+            if (side == EPlayerSide.Bear) return Loc.T("role.bear");
             string name = role.ToString();
             switch (role)
             {
                 case WildSpawnType.assault:
                 case WildSpawnType.cursedAssault:
                 case WildSpawnType.assaultGroup:
-                    return "Scav";
+                    return Loc.T("role.scav");
                 case WildSpawnType.marksman:
-                    return "Scav sniper";
+                    return Loc.T("role.scav_sniper");
                 case WildSpawnType.pmcBot:
-                    return "Raider";
+                    return Loc.T("role.raider");
                 case WildSpawnType.exUsec:
-                    return "Rogue";
+                    return Loc.T("role.rogue");
             }
-            if (name.StartsWith("boss")) return "Boss " + Title(name.Substring(4));
-            if (name.StartsWith("follower")) return "Guard";
-            if (name.StartsWith("sectant")) return "Cultist";
+            if (name.StartsWith("boss")) return Loc.F("role.boss", ("name", Title(name.Substring(4))));
+            if (name.StartsWith("follower")) return Loc.T("role.guard");
+            if (name.StartsWith("sectant")) return Loc.T("role.cultist");
             return Title(name);
         }
 
@@ -99,22 +100,22 @@ namespace RealTargets.Autopsy
         /// <summary>What EFT says finished the body (Player.LastDamageType), for deaths without a recorded killing projectile.</summary>
         internal static string DeathType(EDamageType type) => type switch
         {
-            EDamageType.Bullet or EDamageType.Sniper => "gunshot",
-            EDamageType.Explosion or EDamageType.ThermobaricExplosion or EDamageType.Artillery => "explosion",
-            EDamageType.GrenadeFragment => "grenade fragments",
-            EDamageType.Landmine => "landmine",
-            EDamageType.LightBleeding => "bled out (light bleeding)",
-            EDamageType.HeavyBleeding => "bled out (heavy bleeding)",
-            EDamageType.Fall => "fall",
-            EDamageType.Melee => "melee",
-            EDamageType.Blunt => "blunt trauma",
-            EDamageType.Barbed => "barbed wire",
-            EDamageType.Flame or EDamageType.HotGases => "burns",
-            EDamageType.Btr => "BTR fire",
-            EDamageType.Dehydration => "dehydration",
-            EDamageType.Exhaustion => "exhaustion",
-            EDamageType.Poison or EDamageType.LethalToxin => "poison",
-            EDamageType.RadExposure => "radiation",
+            EDamageType.Bullet or EDamageType.Sniper => Loc.T("death.gunshot"),
+            EDamageType.Explosion or EDamageType.ThermobaricExplosion or EDamageType.Artillery => Loc.T("death.explosion"),
+            EDamageType.GrenadeFragment => Loc.T("death.grenade_fragments"),
+            EDamageType.Landmine => Loc.T("death.landmine"),
+            EDamageType.LightBleeding => Loc.T("death.light_bleeding"),
+            EDamageType.HeavyBleeding => Loc.T("death.heavy_bleeding"),
+            EDamageType.Fall => Loc.T("death.fall"),
+            EDamageType.Melee => Loc.T("death.melee"),
+            EDamageType.Blunt => Loc.T("death.blunt"),
+            EDamageType.Barbed => Loc.T("death.barbed_wire"),
+            EDamageType.Flame or EDamageType.HotGases => Loc.T("death.burns"),
+            EDamageType.Btr => Loc.T("death.btr"),
+            EDamageType.Dehydration => Loc.T("death.dehydration"),
+            EDamageType.Exhaustion => Loc.T("death.exhaustion"),
+            EDamageType.Poison or EDamageType.LethalToxin => Loc.T("death.poison"),
+            EDamageType.RadExposure => Loc.T("death.radiation"),
             _ => type.ToString().ToLowerInvariant(),
         };
 
@@ -122,17 +123,17 @@ namespace RealTargets.Autopsy
         internal static string Effect(string typeName)
         {
             if (string.IsNullOrEmpty(typeName)) return null;
-            if (typeName.Contains("HeavyBleeding")) return "heavy bleed";
-            if (typeName.Contains("LightBleeding")) return "light bleed";
-            if (typeName.Contains("Fracture")) return "fracture";
+            if (typeName.Contains("HeavyBleeding")) return Loc.T("effect.heavy_bleed");
+            if (typeName.Contains("LightBleeding")) return Loc.T("effect.light_bleed");
+            if (typeName.Contains("Fracture")) return Loc.T("effect.fracture");
             return null;
         }
 
         internal static string Ago(System.TimeSpan span)
         {
-            if (span.TotalSeconds < 60) return $"{span.TotalSeconds:F0} s ago";
-            if (span.TotalMinutes < 60) return $"{(int)span.TotalMinutes} min ago";
-            return $"{(int)span.TotalHours} h {span.Minutes} min ago";
+            if (span.TotalSeconds < 60) return Loc.F("time.ago_seconds", ("s", span.TotalSeconds.ToString("F0")));
+            if (span.TotalMinutes < 60) return Loc.F("time.ago_minutes", ("min", (int)span.TotalMinutes));
+            return Loc.F("time.ago_hours", ("h", (int)span.TotalHours), ("min", span.Minutes));
         }
     }
 }

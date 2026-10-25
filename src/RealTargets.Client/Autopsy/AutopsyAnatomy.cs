@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Text;
 using EFT;
 using RealTargets.Gore;
+using RealTargets.Localization;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -501,6 +502,9 @@ namespace RealTargets.Autopsy
             return ((p1 + d1 * s) - (p2 + d2 * t)).magnitude;
         }
 
+        /// <summary>An organ's display name (its id is the English name: "left lung" -> key organ.left_lung).</summary>
+        private static string OrganName(string id) => Loc.T("organ." + id.Replace(' ', '_'));
+
         /// <summary>"heart (#3), left lung (#3, #5); cavity: liver (#5)" for the legend; empty when no shot reached an organ.</summary>
         /// <summary>"left lung, heart; cavity reached: liver" for one shot; empty when it reached none.</summary>
         public string SummaryFor(int shot)
@@ -509,12 +513,12 @@ namespace RealTargets.Autopsy
             var near = new List<string>(3);
             foreach (var o in _organs)
             {
-                if (o.Hit.Contains(shot)) hit.Add(o.Name);
-                else if (o.Near.Contains(shot)) near.Add(o.Name);
+                if (o.Hit.Contains(shot)) hit.Add(OrganName(o.Name));
+                else if (o.Near.Contains(shot)) near.Add(OrganName(o.Name));
             }
             if (hit.Count == 0 && near.Count == 0) return string.Empty;
             string through = string.Join(", ", hit);
-            string cavity = near.Count > 0 ? $"cavity reached: {string.Join(", ", near)}" : string.Empty;
+            string cavity = near.Count > 0 ? Loc.F("organs.cavity", ("organs", string.Join(", ", near))) : string.Empty;
             return hit.Count > 0 && near.Count > 0 ? $"{through}; {cavity}" : hit.Count > 0 ? through : cavity;
         }
 
@@ -524,11 +528,12 @@ namespace RealTargets.Autopsy
             var near = new StringBuilder();
             foreach (var o in _organs)
             {
-                if (o.Hit.Count > 0) Append(hit, o.Name, o.Hit);
-                else if (o.Near.Count > 0) Append(near, o.Name, o.Near);
+                if (o.Hit.Count > 0) Append(hit, OrganName(o.Name), o.Hit);
+                else if (o.Near.Count > 0) Append(near, OrganName(o.Name), o.Near);
             }
             if (hit.Length == 0 && near.Length == 0) return string.Empty;
-            return hit.Length > 0 && near.Length > 0 ? $"{hit}; cavity reached: {near}" : hit.Length > 0 ? hit.ToString() : $"cavity reached: {near}";
+            string reached = near.Length > 0 ? Loc.F("organs.cavity", ("organs", near.ToString())) : string.Empty;
+            return hit.Length > 0 && near.Length > 0 ? $"{hit}; {reached}" : hit.Length > 0 ? hit.ToString() : reached;
 
             static void Append(StringBuilder sb, string name, List<int> shots)
             {

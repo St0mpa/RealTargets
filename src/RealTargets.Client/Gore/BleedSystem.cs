@@ -129,6 +129,34 @@ namespace RealTargets.Gore
             else if (WoundPath.IsNeck(c)) flow *= 2f;
             flow *= Plugin.BleedMultiplier.Value;
 
+            // blood-5 (blood-4 test: buckshot at 1.4 m made 8 oozing sites of 42 ml/min, each clotting alone, and no run after
+            // 1.9 L lost): pellets of one shell that land within 6 cm of an earlier one (a tight close-range pattern) tear one
+            // wound together, so they join its site: the flows add up (a little less: overlapping tracks).
+            if (hit.ProjectileCount > 1 && !string.IsNullOrEmpty(hit.SourceId))
+            {
+                foreach (var other in bleeder.Sites)
+                {
+                    if (other.SourceId != hit.SourceId || other.Bone == null || Time.time - other.CreatedAt > 0.5f) continue;
+                    if ((other.Entry.position - path.Start).sqrMagnitude > 0.06f * 0.06f) continue;
+                    other.Flow += flow * 0.8f;
+                    other.Energy += e;
+                    if (!other.HasExit && path.Exited)
+                    {
+                        other.HasExit = true;
+                        other.LocalExit = other.Bone.InverseTransformPoint(path.End);
+                        other.LocalExitOutward = other.Bone.InverseTransformDirection(path.Direction);
+                    }
+                    if (other.Kind != BleedKind.Arterial)
+                    {
+                        other.Kind = other.Flow < 60f ? BleedKind.Ooze : other.Flow < 200f ? BleedKind.Flow : BleedKind.Heavy;
+                        other.ClotHalfLife = other.Kind == BleedKind.Heavy ? 200f : other.Kind == BleedKind.Flow ? 110f : 50f;
+                    }
+                    if (bleeder.IsDead) other.DrainRate = other.Flow * 0.6f;
+                    bleeder.Log($"pellet joins {other.Collider}: {other.Kind} {other.Flow:F0} ml/min");
+                    return;
+                }
+            }
+
             var site = new BleedSite
             {
                 BodyPart = path.Entry.BodyPart,
@@ -144,6 +172,7 @@ namespace RealTargets.Gore
                 LocalExitOutward = bone.InverseTransformDirection(path.Direction),
                 Flow = flow,
                 Kind = flow < 60f ? BleedKind.Ooze : flow < 200f ? BleedKind.Flow : BleedKind.Heavy,
+                SourceId = hit.SourceId,
             };
 
             // Arteries run where they run: a hit there cuts one by chance, more likely the bigger
@@ -155,6 +184,8 @@ namespace RealTargets.Gore
                 site.Kind = BleedKind.Arterial;
                 site.Flow = Mathf.Max(site.Flow, arterialFlow * Random.Range(0.7f, 1.2f) * Plugin.BleedMultiplier.Value);
             }
+            // A dead body neither breathes (no froth) nor keeps its arterial blood scarlet.
+            site.Tone = bleeder.IsDead ? BloodTone.Venous : BloodPalette.ToneFor(c, site.Kind == BleedKind.Arterial);
             site.ClotHalfLife = site.Kind == BleedKind.Arterial ? 0f :
                 site.Kind == BleedKind.Heavy ? 200f : site.Kind == BleedKind.Flow ? 110f : 50f;
 
@@ -171,6 +202,7 @@ namespace RealTargets.Gore
             if (airway > bleeder.MouthBlood)
             {
                 bleeder.MouthBlood = airway;
+                bleeder.MouthTone = WoundPath.IsChest(c) ? BloodTone.Pulmonary : BloodTone.Venous;
                 bleeder.Log($"blood in the airway {airway:P0}");
             }
 
@@ -220,6 +252,7 @@ namespace RealTargets.Gore
                 Flow = flow * Plugin.BleedMultiplier.Value,
                 Kind = arterial ? BleedKind.Arterial : BleedKind.Heavy,
                 ClotHalfLife = arterial ? 0f : 300f,
+                Tone = arterial && !(bleeder.IsDead && !bleeder.Agonal) ? BloodTone.Arterial : BloodTone.Venous,
             };
             if (bleeder.IsDead && !bleeder.Agonal)
             {
@@ -266,6 +299,7 @@ namespace RealTargets.Gore
 
             float dt = Mathf.Min(TickSeconds + Mathf.Max(0f, Time.time - _nextTick), 1f);
             _nextTick = Time.time + TickSeconds;
+            using var part = RealTargets.Diagnostics.Perf.Part(RealTargets.Diagnostics.PerfPart.BleedTick);
 
             _remove.Clear();
             foreach (var pair in _bleeders)
@@ -289,6 +323,7 @@ namespace RealTargets.Gore
                         b.Log("died (EFT)");
                     }
 
+                    TrackPlace(b, dt);
                     if (b.IsDead) TickDead(b, dt);
                     else TickAlive(b, health, dt);
 
@@ -319,8 +354,9 @@ namespace RealTargets.Gore
                 s.Rate = empty || s.Bone == null ? 0f : s.Flow * pressureFactor;
             }
             if (!empty) LeakCavities(b, 0.06f, dt);
-            bool prone = b.Player.IsInPronePose;
-            foreach (var s in b.Sites) Drain(b, s, s.Rate, dt, prone);
+            // blood-5: a bot standing still pools too (most drops fall to its feet; some soak and run on the clothes).
+            float pool = !b.Still ? 0f : b.Player.IsInPronePose ? 1f : 0.7f;
+            foreach (var s in b.Sites) Drain(b, s, s.Rate, dt, pool);
             UpdatePool(b, dt);
 
             // Airway blood is slowly cleared by coughing.
@@ -377,7 +413,7 @@ namespace RealTargets.Gore
                     s.Rate = empty || s.Bone == null ? 0f : (s.DrainRate > 0f ? s.DrainRate * s.Dependent : s.Flow * pressureFactor);
                 }
                 if (!empty) LeakCavities(b, 0.3f, dt);
-                foreach (var s in b.Sites) Drain(b, s, s.Rate, dt, true);
+                foreach (var s in b.Sites) Drain(b, s, s.Rate, dt, b.Still ? 1f : 0f);
                 UpdatePool(b, dt);
                 return;
             }
@@ -409,7 +445,7 @@ namespace RealTargets.Gore
             if (!empty) LeakCavities(b, 0.3f, dt);
             foreach (var s in b.Sites)
             {
-                Drain(b, s, s.Rate, dt, true);
+                Drain(b, s, s.Rate, dt, b.Still ? 1f : 0f);
                 total += s.Rate;
             }
             UpdatePool(b, dt);
@@ -454,12 +490,53 @@ namespace RealTargets.Gore
             }
         }
 
-        private static void Drain(Bleeder b, BleedSite s, float rate, float dt, bool lying)
+        /// <summary><paramref name="pool"/>: the share of it that collects in this place's pool (0 while the body moves).</summary>
+        private static void Drain(Bleeder b, BleedSite s, float rate, float dt, float pool)
         {
             float ml = rate * dt / 60f;
             s.Drained += ml;
             b.BloodLost += ml;
-            if (lying) b.PoolVolume += ml;
+            b.PoolVolume += ml * pool;
+        }
+
+        /// <summary>
+        /// blood-5: where the body's blood leaves it now (the mean of the sites' lowest openings: these move with a ragdoll, the
+        /// player root does not) and whether it has been still. Faster than 15 cm/s = moving (walking, dragged, falling);
+        /// 0.5 m from the place's anchor = a new place, whose pool starts from nothing (GroundBlood starts a new pool there too).
+        /// Small nudges (a shot into a corpse, a twitch) keep the place and its volume.
+        /// </summary>
+        private static void TrackPlace(Bleeder b, float dt)
+        {
+            var sum = Vector3.zero;
+            int n = 0;
+            foreach (var s in b.Sites)
+            {
+                if (s.Bone == null) continue;
+                sum += s.Lowest.position;
+                n++;
+            }
+            if (n == 0) return;
+            var at = sum / n;
+            float now = Time.time;
+            if (!b.HasPlace)
+            {
+                b.HasPlace = true;
+                b.PlaceAnchor = b.PlaceLast = at;
+                b.MovedAt = now;
+                return;
+            }
+            var step = at - b.PlaceLast;
+            step.y = 0f;
+            if (step.magnitude > 0.15f * Mathf.Max(dt, 0.05f)) b.MovedAt = now;
+            b.PlaceLast = at;
+            var off = at - b.PlaceAnchor;
+            off.y = 0f;
+            if (off.magnitude > 0.5f)
+            {
+                b.PlaceAnchor = at;
+                b.PoolVolume = 0f;
+                b.PoolRadius = 0f;
+            }
         }
 
         /// <summary>The body's pool spreads toward the size of its volume as a ~2.5 mm film (0.10.3; 0.10.2 1.5 mm made a 1.2-1.4 m pool within a minute of a decapitation), max 1.1 m radius, with a lag.</summary>

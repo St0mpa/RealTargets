@@ -55,7 +55,7 @@ namespace RealTargets.Diagnostics
             }
 
             var target = volley.Target;
-            if (target != null && target.IsAI)
+            if (target != null && Hits.Targets.IsBot(target))
             {
                 Focus = target;
             }
@@ -111,11 +111,13 @@ namespace RealTargets.Diagnostics
 
         private void OnGUI()
         {
-            if (!Plugin.DebugMode.Value || !_visibleStatic || !InRaid())
+            if (!Plugin.DebugMode.Value || !_visibleStatic || Perf.HideOverlay || !InRaid())
             {
                 return;
             }
 
+            // perf-3: IMGUI runs several times a frame (layout, repaint, input events); ours, so counted.
+            using var perf = Perf.Measure(PerfArea.Overlay);
             EnsureStyles();
             DrawDummyLabels();
 

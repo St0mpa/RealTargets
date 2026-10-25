@@ -20,8 +20,9 @@ namespace RealTargets.Gore
     ///   used a flat quad on one bone: it sank into the cloth as it deformed (Stompa, 0.9.0 test);
     /// - drawn with a multiply shader: the wound darkens/tints the cloth as the map lit it. The 0.9.0
     ///   lit-transparent quads ignored shadows and glowed red in dark rooms;
-    /// - entry: round hole ~ calibre with a bruised collar and a little blood; exit: larger, ragged
-    ///   stellate tear sized from the temporary cavity; textures are generated here (no assets).
+    /// - entry: round hole ~ calibre with a margin of abrasion, stretched along an oblique shot; exit: larger,
+    ///   irregular, shape by energy, sized from the temporary cavity; fabric gets its own puncture and exit tear;
+    ///   textures are generated here (no assets), four shapes per kind in a 2x2 atlas (1.2.0, WoundTextures).
     /// Works on living bots and corpses; plate-stopped rounds leave no hole. Unreadable meshes fall
     /// back to the 0.9.0 flat quad on the hit bone.
     /// 0.10.0: the same skinned patches also draw blood running down the clothing from a bleeding
@@ -35,8 +36,10 @@ namespace RealTargets.Gore
     {
         private const int MaxPerBody = 48;
         private const int MaxTotal = 600;
-        private const int MaxStainsPerBody = 120;
-        private const int MaxStainsTotal = 1000;
+        // blood-5: two runs per wound plus the feeding of finished runs; at 120 a body shot six times dropped its oldest patches
+        // (the top of each run, at the wound) first.
+        private const int MaxStainsPerBody = 200;
+        private const int MaxStainsTotal = 1200;
         private const int Grid = 5;
         private const float Lift = 0.003f;
 
@@ -47,23 +50,53 @@ namespace RealTargets.Gore
         private static float LiftFor(PatchKind kind) => kind == PatchKind.Stain ? Lift + Random.Range(0f, 0.0009f) : Lift + 0.0016f;
         private const string Prefix = "RealTargetsWound";
 
+        /// <summary>
+        /// One skin baked at the bake's pose. perf-6 (perf-5 raid: cooking was 97 % of a bake, 1-1.7 ms per mesh, and a
+        /// cached bake's colliders cost the same again when switched back on): no MeshCollider any more; the baked vertices
+        /// (renderer space, scale divided out) are ray-tested here (<see cref="Test"/>), so a bake is the skinning plus a
+        /// copy, ~0.1 ms per mesh.
+        /// </summary>
         private sealed class BakedPart
         {
-            public GameObject Go;
-            public Mesh Mesh;
-            public MeshCollider Collider;
             public SkinnedMeshRenderer Source;
             public Mesh SourceMesh;
             public Vector3 SourcePosition;
+            public List<Vector3> Vertices;
             public int[] Triangles;
+            public Matrix4x4 ToWorld, ToLocal;
+            // Mirrored renderer (negative scale product): the winding, so the facing test, flips.
+            public bool Mirrored;
+            public Vector3 Min, Max;
+            public Topology Topo;
         }
 
         /// <summary>
-        /// A body's meshes baked into temporary colliders. 0.10.10 (4.1.6 raid: `Bleed` 8-12 ms and `Hits` 6-11 ms worst
+        /// A source mesh's fixed topology (perf-7): its triangles, each vertex's triangles (CSR) and its longest edge. Every
+        /// triangle that reaches into a box has a vertex within the box grown by the longest edge, so a query scans the
+        /// vertices (one read each) instead of the triangles (three), then tests only their triangles.
+        /// </summary>
+        private sealed class Topology
+        {
+            public int[] Triangles;
+            public int[] VertexStart;
+            public int[] VertexTriangles;
+            public float MaxEdge;
+            public int[] Stamp;
+            public int StampId;
+        }
+
+        // Baked skins: one scratch mesh, the topology per source mesh, vertex lists reused.
+        private static Mesh _scratch;
+        private static readonly Dictionary<Mesh, Topology> Topologies = new Dictionary<Mesh, Topology>();
+        private static readonly Stack<List<Vector3>> VertexLists = new Stack<List<Vector3>>();
+        private static readonly List<int> Candidates = new List<int>();
+
+        /// <summary>
+        /// A body's meshes baked for surface rays. 0.10.10 (4.1.6 raid: `Bleed` 8-12 ms and `Hits` 6-11 ms worst
         /// frames): kept while the skeleton stays where it was (every bone within <see cref="PoseTolerance"/>, same
-        /// meshes), so the stains running down a still corpse no longer re-bake and re-cook its clothing every time;
-        /// destroyed after <see cref="BakeLifetime"/> s unused. The colliders are only enabled during the frame that
-        /// queries them (off at the end of every frame), so bullets, grenades and droplets never meet them.
+        /// meshes), so the stains running down a still corpse don't re-bake its clothing every time; destroyed after
+        /// <see cref="BakeLifetime"/> s unused. perf-6: no physics objects (see <see cref="BakedPart"/>), so bullets,
+        /// grenades and droplets never meet them.
         /// </summary>
         private sealed class Baked
         {
@@ -78,8 +111,13 @@ namespace RealTargets.Gore
         }
 
         private const float PoseTolerance = 0.003f;
-        private const float BakeLifetime = 5f;
+        // perf-5 (perf-4 raid: every stain on a still corpse re-baked 3-4 meshes, 3.5-7 ms): 5 s was shorter than a draining
+        // corpse's stain cadence (up to 4.8 s per site, contact soaks every 2-3 s until 8), so most stains found the bake gone.
+        // Unused bakes only cost memory (colliders off), and MaxBakes caps them.
+        private const float BakeLifetime = 20f;
         private const int MaxBakes = 12;
+        // Why a body's bake went away (perf-5, dev log): the next bake of that body names it.
+        private readonly Dictionary<int, string> _dropped = new Dictionary<int, string>();
 
         private struct SurfaceHit
         {
@@ -100,6 +138,7 @@ namespace RealTargets.Gore
             // Mesh space = world space when the patch was laid; each bone's bind pose is its pose then.
             public Vector3[] Vertices;
             public Vector3[] Normals;
+            public Vector2[] Uvs;
             public Color32[] Colors;
             public int[] Triangles;
             public BoneWeight[] Weights;
@@ -162,7 +201,6 @@ namespace RealTargets.Gore
         private Material _punct, _punctColour, _punctLit;
         private Mesh _quad;
         private int[] _gridTriangles;
-        private Vector2[] _gridUvs;
         private bool _cleanupQueued;
         private bool _loggedMode;
 
@@ -192,6 +230,19 @@ namespace RealTargets.Gore
             }
         }
 
+        /// <summary>perf-3 (dev split benchmark): every renderer drawing a wound or stain patch (batches and flat fallbacks).</summary>
+        internal void CollectRenderers(List<Renderer> into)
+        {
+            foreach (var b in _batches.Values)
+            {
+                if (b.Go != null && b.Renderer != null) into.Add(b.Renderer);
+            }
+            foreach (var p in _all)
+            {
+                if (p.Alive && p.Flat != null) into.Add(p.Flat.GetComponent<Renderer>());
+            }
+        }
+
         private void Awake()
         {
             Instance = this;
@@ -202,6 +253,8 @@ namespace RealTargets.Gore
         {
             HitCollector.Published -= OnHit;
             ClearBakes();
+            if (_scratch != null) Destroy(_scratch);
+            _scratch = null;
         }
 
         internal void ResetRaid()
@@ -212,12 +265,14 @@ namespace RealTargets.Gore
             _stainsPerBody.Clear();
             _allStains.Clear();
             _weights.Clear();
+            Topologies.Clear();
             foreach (var b in _batches.Values)
             {
                 if (b.Go != null) Destroy(b.Go);
             }
             _batches.Clear();
             _dirty.Clear();
+            _clusters.Clear();
         }
 
         /// <summary>Uploads the batches that got or lost patches this frame (once per batch per frame).</summary>
@@ -259,6 +314,10 @@ namespace RealTargets.Gore
 
         private void Place(HitEvent hit)
         {
+            LitBlood.DumpEftShaders();
+            if (hit.Target != null) LitBlood.DumpBody(hit.Target.GetComponentInChildren<SkinnedMeshRenderer>());
+            // blood-5b: the map is loaded by now: the EFT ground materials take the map's cubemap and a map material's values.
+            if (hit.Target != null) LitBlood.LateResolve(hit.Target);
             int first = hit.Segments.FindIndex(s => !s.HasPlate);
             if (first < 0)
             {
@@ -339,14 +398,18 @@ namespace RealTargets.Gore
                 else
                 {
                     var kind = look == EntryLook.Skin ? PatchKind.Entry : PatchKind.Puncture;
-                    float size = look == EntryLook.Skin ? hole / (2f * 0.18f) : hole / (2f * 0.16f);
-                    if (SpawnSkinned(player, baked, at, size, kind, null))
+                    // Oblique: stretched along the shot (+U = the way it travelled), margin wider on the side it came from.
+                    float aspect = WoundTextures.EntryAspect(dir, at.Normal);
+                    int cell = kind == PatchKind.Entry ? WoundTextures.EntryCell(hit.IsFragment, Calibre(hit.Caliber), aspect) : WoundTextures.PunctureCell(false);
+                    float size = kind == PatchKind.Entry ? hole / (2f * WoundTextures.EntryOuter) : hole / (2f * WoundTextures.PunctureHole);
+                    if (SpawnSkinned(player, baked, at, size, kind, dir, cell, aspect))
                     {
-                        Debug(hit, $"{leg}entry ({look}) skinned on {surface}");
+                        Debug(hit, $"{leg}entry ({look}, shape {cell}, x{aspect:F2} along the shot) skinned on {surface}");
+                        if (hit.ProjectileCount > 1 && !hit.IsFragment) PelletCluster(hit, player, baked, at.Point, dir, kind, hole);
                     }
                     else
                     {
-                        Spawn(player, bone, at.Point, at.Normal, size, kind);
+                        Spawn(player, bone, at.Point, at.Normal, size, kind, cell);
                         Debug(hit, $"{leg}entry ({look}) flat on {bone.name} (no bone weights)");
                     }
                 }
@@ -370,15 +433,79 @@ namespace RealTargets.Gore
             if (colliders.TryGetValue(path.ExitCollider, out var exitBpc) && exitBpc != null) bone = exitBpc.TransformCached;
             if (Surface(baked, path.End + dir * 0.3f, -dir, 0.6f, -1, out at) || SurfaceTowardBone(baked, path.End, bone, out at))
             {
-                if (!SpawnSkinned(player, baked, at, exitSize / (2f * 0.30f), PatchKind.Exit, null))
+                // Out through skin: a torn exit by energy; through clothing or gear: a fabric exit tear.
+                var exitPart = baked.Parts[at.Part];
+                string exitMesh = exitPart.Source != null ? exitPart.Source.name : "?";
+                bool skin = SurfaceOf(exitMesh, MaterialAt(exitPart, at.Triangle)) == SurfaceKind.Skin;
+                var kind = skin ? PatchKind.Exit : PatchKind.Puncture;
+                int cell = skin ? WoundTextures.ExitCell(energy, false) : WoundTextures.PunctureCell(true);
+                // blood-1: fabric exits were too small to see at the top of their run: 1.35x.
+                // blood-3: a 12.7 mm exit through cloth was a small tear: very high energy tears more.
+                float size = skin ? exitSize / (2f * WoundTextures.ExitReach) : exitSize * 1.35f * (energy > 5000f ? 1.5f : 1f) / (2f * WoundTextures.PunctureTear);
+                bool mirror = Random.value < 0.5f;
+                if (!SpawnSkinned(player, baked, at, size, kind, null, cell, 1f, mirror))
                 {
-                    Spawn(player, bone, at.Point, at.Normal, exitSize / (2f * 0.30f), PatchKind.Exit);
+                    Spawn(player, bone, at.Point, at.Normal, size, kind, cell);
                 }
-                Debug(hit, $"{leg}exit placed{(InferredExit(hit, path.Leg) ? " (inferred)" : "")}");
+                Debug(hit, $"{leg}exit placed ({(skin ? "skin" : "fabric")}, shape {cell}){(InferredExit(hit, path.Leg) ? " (inferred)" : "")}");
             }
             else
             {
                 Debug(hit, $"{leg}no exit patch: no surface along the shot or toward {bone.name}");
+            }
+        }
+
+        private sealed class Cluster
+        {
+            public readonly List<Vector3> Points = new List<Vector3>(8);
+            public float Time;
+            public bool Torn;
+        }
+
+        private readonly Dictionary<(int body, string source), Cluster> _clusters = new Dictionary<(int, string), Cluster>();
+
+        /// <summary>
+        /// blood-5 (blood-4 test: buckshot at 1.4 m read as "a stain with dots"): at close range a shell's charge is still nearly
+        /// one mass and tears one ragged wound with the pellet holes tight around it. Once three pellets of one shell have
+        /// entered within 6 cm of their centre, one torn patch (fabric: the ragged tear; skin: the jagged entry) covers the
+        /// middle, sized to the pattern. The pellet holes stay round it.
+        /// </summary>
+        private void PelletCluster(HitEvent hit, Player player, Baked baked, Vector3 point, Vector3 dir, PatchKind kind, float hole)
+        {
+            if (string.IsNullOrEmpty(hit.SourceId)) return;
+            var key = (player.Id, hit.SourceId);
+            if (!_clusters.TryGetValue(key, out var cluster) || UnityEngine.Time.time - cluster.Time > 1f)
+            {
+                if (_clusters.Count > 64) _clusters.Clear();
+                _clusters[key] = cluster = new Cluster { Time = UnityEngine.Time.time };
+            }
+            cluster.Points.Add(point);
+            if (cluster.Torn || cluster.Points.Count < 3) return;
+
+            var centre = Vector3.zero;
+            foreach (var p in cluster.Points) centre += p;
+            centre /= cluster.Points.Count;
+            float spread = 0f;
+            int near = 0;
+            foreach (var p in cluster.Points)
+            {
+                float d = (p - centre).magnitude;
+                if (d < 0.06f)
+                {
+                    near++;
+                    spread = Mathf.Max(spread, d);
+                }
+            }
+            if (near < 3) return;
+            if (!Surface(baked, centre - dir * 0.3f, dir, 0.6f, -1, out var at)) return;
+            cluster.Torn = true;
+            float diameter = 2f * spread + hole * 2.5f;
+            bool fabric = kind == PatchKind.Puncture;
+            float size = fabric ? diameter / (2f * WoundTextures.PunctureTear) : diameter / (2f * WoundTextures.EntryOuter);
+            int cell = fabric ? 2 : 3;
+            if (SpawnSkinned(player, baked, at, size, kind, dir, cell, 1f, Random.value < 0.5f))
+            {
+                Debug(hit, $"pellet cluster: {near} pellets within {spread * 100f:F1} cm, one torn {(fabric ? "fabric" : "skin")} wound {diameter * 100f:F1} cm");
             }
         }
 
@@ -507,11 +634,11 @@ namespace RealTargets.Gore
             try
             {
                 var materials = part.Source != null ? part.Source.sharedMaterials : null;
-                if (materials == null || materials.Length == 0 || part.Mesh == null) return "?";
+                if (materials == null || materials.Length == 0 || part.SourceMesh == null) return "?";
                 int sub = 0, first = 0;
-                for (int s = 0; s < part.Mesh.subMeshCount; s++)
+                for (int s = 0; s < part.SourceMesh.subMeshCount; s++)
                 {
-                    int count = (int)part.Mesh.GetIndexCount(s) / 3;
+                    int count = (int)part.SourceMesh.GetIndexCount(s) / 3;
                     if (triangle < first + count) { sub = s; break; }
                     first += count;
                     sub = s;
@@ -621,25 +748,29 @@ namespace RealTargets.Gore
 
         private Baked Bake(Player player)
         {
+            string why = null;
             if (_baked.TryGetValue(player.Id, out var cached))
             {
-                if (cached.Frame == Time.frameCount || StillValid(cached))
+                if (cached.Frame == Time.frameCount || (why = Invalid(cached)) == null)
                 {
-                    if (cached.Frame != Time.frameCount)
-                    {
-                        cached.Frame = Time.frameCount;
-                        foreach (var part in cached.Parts)
-                        {
-                            if (part.Collider != null) part.Collider.enabled = true;
-                        }
-                    }
+                    cached.Frame = Time.frameCount;
                     cached.LastUsed = Time.time;
                     QueueCleanup();
                     return cached;
                 }
                 DestroyBake(cached);
             }
+            else if (_dropped.TryGetValue(player.Id, out why))
+            {
+                _dropped.Remove(player.Id);
+            }
+            // Corpses only: a living body moves between almost every two bakes.
+            if (why != null && Plugin.PerfLogging && (player.HealthController == null || !player.HealthController.IsAlive))
+            {
+                Plugin.Log.LogInfo($"[Perf] corpse re-bake {player.Profile?.Nickname}: {why}");
+            }
 
+            using var timing = RealTargets.Diagnostics.Perf.Part(RealTargets.Diagnostics.PerfPart.BakeSetup);
             // Lower LODs are enabled renderers too (the LODGroup only hides them): bake LOD0 only.
             var lowLods = new HashSet<Renderer>();
             foreach (var group in player.GetComponentsInChildren<LODGroup>())
@@ -677,23 +808,29 @@ namespace RealTargets.Gore
             return baked;
         }
 
-        /// <summary>The body has not moved since the bake: every bone where it was, every baked mesh unchanged.</summary>
-        private static bool StillValid(Baked baked)
+        /// <summary>
+        /// Null while the body has not moved since the bake (every bone where it was, every baked mesh unchanged), otherwise
+        /// why not (perf-5: logged with the re-bake).
+        /// </summary>
+        private static string Invalid(Baked baked)
         {
-            if (baked.Player == null || baked.PoseBones == null) return false;
+            if (baked.Player == null || baked.PoseBones == null) return "body gone";
             const float tol = PoseTolerance * PoseTolerance;
             for (int i = 0; i < baked.PoseBones.Length; i++)
             {
                 var b = baked.PoseBones[i];
-                if (b == null || (b.position - baked.Pose[i]).sqrMagnitude > tol) return false;
+                if (b == null) return "a bone gone";
+                float moved = (b.position - baked.Pose[i]).sqrMagnitude;
+                if (moved > tol) return $"bone {b.name} moved {Mathf.Sqrt(moved) * 1000f:F1} mm in {Time.time - baked.LastUsed:F1} s";
             }
             foreach (var part in baked.Parts)
             {
                 // A swapped mesh (skull burst cut, limb removed), a hidden renderer or a moved renderer: bake again.
-                if (part.Source == null || !part.Source.enabled || part.Source.sharedMesh != part.SourceMesh ||
-                    (part.Source.transform.position - part.SourcePosition).sqrMagnitude > tol) return false;
+                if (part.Source == null || !part.Source.enabled) return "a baked renderer hidden or gone";
+                if (part.Source.sharedMesh != part.SourceMesh) return $"mesh of {part.Source.name} swapped";
+                if ((part.Source.transform.position - part.SourcePosition).sqrMagnitude > tol) return $"renderer {part.Source.name} moved";
             }
-            return true;
+            return null;
         }
 
         private void QueueCleanup()
@@ -703,17 +840,298 @@ namespace RealTargets.Gore
             StartCoroutine(CleanupAtEndOfFrame());
         }
 
+        /// <summary>
+        /// The ray against one baked skin (perf-6, replaces MeshCollider.Raycast): the nearest triangle within
+        /// <paramref name="distance"/> and nearer than <paramref name="bestDist"/>, front faces only unless
+        /// Physics.queriesHitBackfaces (as PhysX did). Point, face normal (toward the ray), triangle index into the mesh's
+        /// triangles and barycentrics (v0, v1, v2) as a RaycastHit gives them.
+        /// </summary>
         private static void Test(Baked baked, int i, Ray ray, float distance, ref float bestDist, ref SurfaceHit result)
         {
             var part = baked.Parts[i];
-            if (part.Collider != null && part.Collider.Raycast(ray, out var hitInfo, distance) && hitInfo.distance < bestDist)
+            var verts = part.Vertices;
+            var tris = part.Triangles;
+            if (verts == null || tris == null || distance <= 0f) return;
+
+            // The segment in the skin's own space: an affine map keeps the fraction along it, so t is shared.
+            var o = part.ToLocal.MultiplyPoint3x4(ray.origin);
+            var d = part.ToLocal.MultiplyVector(ray.direction * distance);
+            float limit = Mathf.Min(1f, bestDist / distance), t0 = 0f, t1 = limit;
+            if (!Clip(part.Min, part.Max, o, d, ref t0, ref t1)) return;
+            var s0 = o + d * t0;
+            var s1 = o + d * t1;
+            var lo = Vector3.Min(s0, s1) - Vector3.one * 1e-4f;
+            var hi = Vector3.Max(s0, s1) + Vector3.one * 1e-4f;
+
+            bool backfaces = Physics.queriesHitBackfaces;
+            float facing = part.Mirrored ? -1f : 1f;
+            int best = -1;
+            float bestT = limit, bestU = 0f, bestV = 0f;
+            Gather(part, lo, hi, Candidates);
+            for (int n = 0; n < Candidates.Count; n++)
             {
-                bestDist = hitInfo.distance;
-                result.Point = hitInfo.point;
-                result.Normal = hitInfo.normal;
-                result.Part = i;
-                result.Triangle = hitInfo.triangleIndex;
-                result.Bary = hitInfo.barycentricCoordinate;
+                int tri = Candidates[n];
+                int k = tri * 3;
+                var a = verts[tris[k]];
+                var b = verts[tris[k + 1]];
+                var c = verts[tris[k + 2]];
+                if ((a.x < lo.x && b.x < lo.x && c.x < lo.x) || (a.x > hi.x && b.x > hi.x && c.x > hi.x) ||
+                    (a.y < lo.y && b.y < lo.y && c.y < lo.y) || (a.y > hi.y && b.y > hi.y && c.y > hi.y) ||
+                    (a.z < lo.z && b.z < lo.z && c.z < lo.z) || (a.z > hi.z && b.z > hi.z && c.z > hi.z)) continue;
+
+                // Moller-Trumbore. det = -dot(d, cross(e1, e2)); Unity's front face normal is cross(e1, e2).
+                float e1x = b.x - a.x, e1y = b.y - a.y, e1z = b.z - a.z;
+                float e2x = c.x - a.x, e2y = c.y - a.y, e2z = c.z - a.z;
+                float px = d.y * e2z - d.z * e2y, py = d.z * e2x - d.x * e2z, pz = d.x * e2y - d.y * e2x;
+                float det = e1x * px + e1y * py + e1z * pz;
+                if (det > -1e-12f && det < 1e-12f) continue;
+                if (!backfaces && det * facing < 0f) continue;
+                float inv = 1f / det;
+                float sx = o.x - a.x, sy = o.y - a.y, sz = o.z - a.z;
+                float u = (sx * px + sy * py + sz * pz) * inv;
+                if (u < 0f || u > 1f) continue;
+                float qx = sy * e1z - sz * e1y, qy = sz * e1x - sx * e1z, qz = sx * e1y - sy * e1x;
+                float v = (d.x * qx + d.y * qy + d.z * qz) * inv;
+                if (v < 0f || u + v > 1f) continue;
+                float t = (e2x * qx + e2y * qy + e2z * qz) * inv;
+                if (t < 0f || t > bestT) continue;
+                best = tri;
+                bestT = t;
+                bestU = u;
+                bestV = v;
+            }
+            if (best < 0) return;
+
+            int at = best * 3;
+            var wa = part.ToWorld.MultiplyPoint3x4(verts[tris[at]]);
+            var wb = part.ToWorld.MultiplyPoint3x4(verts[tris[at + 1]]);
+            var wc = part.ToWorld.MultiplyPoint3x4(verts[tris[at + 2]]);
+            var normal = Vector3.Cross(wb - wa, wc - wa).normalized;
+            if (Vector3.Dot(normal, ray.direction) > 0f) normal = -normal;
+            bestDist = bestT * distance;
+            result.Point = ray.origin + ray.direction * bestDist;
+            result.Normal = normal;
+            result.Part = i;
+            result.Triangle = best;
+            result.Bary = new Vector3(1f - bestU - bestV, bestU, bestV);
+        }
+
+        /// <summary>Clips the segment fraction [t0, t1] of o + d * t to a box; false when it misses.</summary>
+        private static bool Clip(Vector3 min, Vector3 max, Vector3 o, Vector3 d, ref float t0, ref float t1)
+        {
+            for (int axis = 0; axis < 3; axis++)
+            {
+                float origin = o[axis], dir = d[axis], lo = min[axis], hi = max[axis];
+                if (Mathf.Abs(dir) < 1e-9f)
+                {
+                    if (origin < lo || origin > hi) return false;
+                    continue;
+                }
+                float a = (lo - origin) / dir, b = (hi - origin) / dir;
+                if (a > b) (a, b) = (b, a);
+                if (a > t0) t0 = a;
+                if (b < t1) t1 = b;
+                if (t0 > t1) return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// The skin's triangles that may reach into the local box [lo, hi] (perf-7): the vertices inside it grown by the
+        /// longest edge, then their triangles, each once. A superset; callers test each one.
+        /// </summary>
+        private static void Gather(BakedPart part, Vector3 lo, Vector3 hi, List<int> into)
+        {
+            into.Clear();
+            var topo = part.Topo;
+            var verts = part.Vertices;
+            if (topo == null || verts == null || verts.Count + 1 != topo.VertexStart.Length) return;
+            float e = topo.MaxEdge;
+            float x0 = lo.x - e, y0 = lo.y - e, z0 = lo.z - e, x1 = hi.x + e, y1 = hi.y + e, z1 = hi.z + e;
+            if (++topo.StampId == int.MaxValue)
+            {
+                System.Array.Clear(topo.Stamp, 0, topo.Stamp.Length);
+                topo.StampId = 1;
+            }
+            int stamp = topo.StampId;
+            var start = topo.VertexStart;
+            var vertexTris = topo.VertexTriangles;
+            var marks = topo.Stamp;
+            for (int v = 0; v < verts.Count; v++)
+            {
+                var p = verts[v];
+                if (p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1 || p.z < z0 || p.z > z1) continue;
+                for (int s = start[v], end = start[v + 1]; s < end; s++)
+                {
+                    int tri = vertexTris[s];
+                    if (marks[tri] == stamp) continue;
+                    marks[tri] = stamp;
+                    into.Add(tri);
+                }
+            }
+        }
+
+        /// <summary>The source mesh's topology, built on its first bake (triangles from the baked copy, same order).</summary>
+        private static Topology TopologyOf(Mesh source, Mesh baked, List<Vector3> vertices)
+        {
+            if (Topologies.TryGetValue(source, out var topo)) return topo;
+            var tris = baked.triangles;
+            int vertexCount = vertices.Count;
+            var start = new int[vertexCount + 1];
+            for (int k = 0; k < tris.Length; k++)
+            {
+                if (tris[k] >= 0 && tris[k] < vertexCount) start[tris[k] + 1]++;
+            }
+            for (int v = 0; v < vertexCount; v++) start[v + 1] += start[v];
+            var fill = new int[vertexCount];
+            var vertexTris = new int[start[vertexCount]];
+            float maxEdge = 0f;
+            for (int k = 0; k + 2 < tris.Length; k += 3)
+            {
+                int tri = k / 3;
+                for (int c = 0; c < 3; c++)
+                {
+                    int v = tris[k + c];
+                    if (v < 0 || v >= vertexCount) continue;
+                    vertexTris[start[v] + fill[v]++] = tri;
+                    int w = tris[k + (c + 1) % 3];
+                    if (w >= 0 && w < vertexCount) maxEdge = Mathf.Max(maxEdge, (vertices[v] - vertices[w]).sqrMagnitude);
+                }
+            }
+            // The longest edge at this pose; cloth stretches a little between poses, so a margin.
+            topo = new Topology
+            {
+                Triangles = tris, VertexStart = start, VertexTriangles = vertexTris, MaxEdge = Mathf.Sqrt(maxEdge) * 1.25f + 0.001f,
+                Stamp = new int[tris.Length / 3],
+            };
+            Topologies[source] = topo;
+            return topo;
+        }
+
+        // A patch's grid results (perf-7), reused.
+        private static readonly SurfaceHit[] GridHits = new SurfaceHit[Grid * Grid];
+        private static readonly SurfaceHit[] GridOther = new SurfaceHit[Grid * Grid];
+        private static readonly float[] GridDepth = new float[Grid * Grid];
+        private static readonly float[] GridOtherDepth = new float[Grid * Grid];
+        private static readonly bool[] GridFound = new bool[Grid * Grid];
+
+        /// <summary>
+        /// A patch's 25 surface points in one pass (perf-7; perf-6 cast 25-50 rays, 2-3 ms a stain): the grid's rays are
+        /// parallel (-<paramref name="n"/>, from 4 cm above the patch plane to 4 cm below), so each nearby triangle is
+        /// projected onto the plane once and the grid points inside it read their depth from its barycentrics. Per point the
+        /// same answer as before: the nearest front face on the centre's skin, else the nearest on any baked skin.
+        /// <paramref name="found"/>[k] says whether point k (j * Grid + i) has one in <see cref="GridHits"/>.
+        /// </summary>
+        private static void LayGrid(Baked baked, int centrePart, Vector3 c, Vector3 t, Vector3 b, Vector3 n, float halfU, float half,
+            bool[] found)
+        {
+            const float reach = 0.04f;
+            int count = Grid * Grid;
+            for (int k = 0; k < count; k++)
+            {
+                GridDepth[k] = float.NegativeInfinity;
+                GridOtherDepth[k] = float.NegativeInfinity;
+                found[k] = false;
+            }
+            if (halfU <= 0f || half <= 0f) return;
+            float stepU = 2f * halfU / (Grid - 1), stepV = 2f * half / (Grid - 1);
+            bool backfaces = Physics.queriesHitBackfaces;
+            // The patch volume's world box: half extents along t, b, n.
+            var extent = new Vector3(
+                Mathf.Abs(t.x) * halfU + Mathf.Abs(b.x) * half + Mathf.Abs(n.x) * reach,
+                Mathf.Abs(t.y) * halfU + Mathf.Abs(b.y) * half + Mathf.Abs(n.y) * reach,
+                Mathf.Abs(t.z) * halfU + Mathf.Abs(b.z) * half + Mathf.Abs(n.z) * reach);
+
+            for (int pi = 0; pi < baked.Parts.Count; pi++)
+            {
+                var part = baked.Parts[pi];
+                var verts = part.Vertices;
+                var tris = part.Triangles;
+                if (verts == null || tris == null) continue;
+                var m = part.ToLocal;
+                var lc = m.MultiplyPoint3x4(c);
+                var le = new Vector3(
+                    Mathf.Abs(m.m00) * extent.x + Mathf.Abs(m.m01) * extent.y + Mathf.Abs(m.m02) * extent.z,
+                    Mathf.Abs(m.m10) * extent.x + Mathf.Abs(m.m11) * extent.y + Mathf.Abs(m.m12) * extent.z,
+                    Mathf.Abs(m.m20) * extent.x + Mathf.Abs(m.m21) * extent.y + Mathf.Abs(m.m22) * extent.z);
+                var lo = lc - le;
+                var hi = lc + le;
+                if (lo.x > part.Max.x || hi.x < part.Min.x || lo.y > part.Max.y || hi.y < part.Min.y || lo.z > part.Max.z || hi.z < part.Min.z) continue;
+                Gather(part, lo, hi, Candidates);
+                if (Candidates.Count == 0) continue;
+
+                // Skin space -> patch coordinates (u along t, v along b, w along n, from c): three rows of t/b/n . ToWorld.
+                var w2 = part.ToWorld;
+                float ux = t.x * w2.m00 + t.y * w2.m10 + t.z * w2.m20, uy = t.x * w2.m01 + t.y * w2.m11 + t.z * w2.m21;
+                float uz = t.x * w2.m02 + t.y * w2.m12 + t.z * w2.m22, uo = t.x * w2.m03 + t.y * w2.m13 + t.z * w2.m23 - Vector3.Dot(t, c);
+                float vx = b.x * w2.m00 + b.y * w2.m10 + b.z * w2.m20, vy = b.x * w2.m01 + b.y * w2.m11 + b.z * w2.m21;
+                float vz = b.x * w2.m02 + b.y * w2.m12 + b.z * w2.m22, vo = b.x * w2.m03 + b.y * w2.m13 + b.z * w2.m23 - Vector3.Dot(b, c);
+                float wx = n.x * w2.m00 + n.y * w2.m10 + n.z * w2.m20, wy = n.x * w2.m01 + n.y * w2.m11 + n.z * w2.m21;
+                float wz = n.x * w2.m02 + n.y * w2.m12 + n.z * w2.m22, wo = n.x * w2.m03 + n.y * w2.m13 + n.z * w2.m23 - Vector3.Dot(n, c);
+                bool centre = pi == centrePart;
+                var depth = centre ? GridDepth : GridOtherDepth;
+                var hits = centre ? GridHits : GridOther;
+
+                for (int q = 0; q < Candidates.Count; q++)
+                {
+                    int tri = Candidates[q];
+                    int k3 = tri * 3;
+                    var pa = verts[tris[k3]];
+                    var pb = verts[tris[k3 + 1]];
+                    var pc = verts[tris[k3 + 2]];
+                    float w0 = wx * pa.x + wy * pa.y + wz * pa.z + wo;
+                    float w1 = wx * pb.x + wy * pb.y + wz * pb.z + wo;
+                    float w3 = wx * pc.x + wy * pc.y + wz * pc.z + wo;
+                    if ((w0 > reach && w1 > reach && w3 > reach) || (w0 < -reach && w1 < -reach && w3 < -reach)) continue;
+                    float u0 = ux * pa.x + uy * pa.y + uz * pa.z + uo, v0 = vx * pa.x + vy * pa.y + vz * pa.z + vo;
+                    float u1 = ux * pb.x + uy * pb.y + uz * pb.z + uo, v1 = vx * pb.x + vy * pb.y + vz * pb.z + vo;
+                    float u2 = ux * pc.x + uy * pc.y + uz * pc.z + uo, v2 = vx * pc.x + vy * pc.y + vz * pc.z + vo;
+                    // Twice the projected area = the world face normal along n (t x b = n): > 0 faces the rays' origin side.
+                    float area = (u1 - u0) * (v2 - v0) - (v1 - v0) * (u2 - u0);
+                    if (area > -1e-12f && area < 1e-12f) continue;
+                    if (!backfaces && area < 0f) continue;
+                    int i0 = Mathf.Max(0, Mathf.CeilToInt((Mathf.Min(u0, Mathf.Min(u1, u2)) + halfU) / stepU));
+                    int i1 = Mathf.Min(Grid - 1, Mathf.FloorToInt((Mathf.Max(u0, Mathf.Max(u1, u2)) + halfU) / stepU));
+                    int j0 = Mathf.Max(0, Mathf.CeilToInt((Mathf.Min(v0, Mathf.Min(v1, v2)) + half) / stepV));
+                    int j1 = Mathf.Min(Grid - 1, Mathf.FloorToInt((Mathf.Max(v0, Mathf.Max(v1, v2)) + half) / stepV));
+                    if (i0 > i1 || j0 > j1) continue;
+                    float inv = 1f / area;
+                    for (int j = j0; j <= j1; j++)
+                    {
+                        float pv = -half + j * stepV;
+                        for (int i = i0; i <= i1; i++)
+                        {
+                            float pu = -halfU + i * stepU;
+                            float b1 = ((pu - u0) * (v2 - v0) - (pv - v0) * (u2 - u0)) * inv;
+                            float b2 = ((u1 - u0) * (pv - v0) - (v1 - v0) * (pu - u0)) * inv;
+                            float b0 = 1f - b1 - b2;
+                            if (b0 < 0f || b1 < 0f || b2 < 0f) continue;
+                            float w = b0 * w0 + b1 * w1 + b2 * w3;
+                            int k = j * Grid + i;
+                            if (w > reach || w < -reach || w <= depth[k]) continue;
+                            depth[k] = w;
+                            // The face normal in patch coordinates, then in the world (the patch frame is a rotation).
+                            float e1u = u1 - u0, e1v = v1 - v0, e1w = w1 - w0, e2u = u2 - u0, e2v = v2 - v0, e2w = w3 - w0;
+                            var np = new Vector3(e1v * e2w - e1w * e2v, e1w * e2u - e1u * e2w, area);
+                            var normal = (t * np.x + b * np.y + n * np.z).normalized;
+                            if (Vector3.Dot(normal, n) < 0f) normal = -normal;
+                            hits[k] = new SurfaceHit
+                            {
+                                Point = c + t * pu + b * pv + n * w, Normal = normal, Part = pi, Triangle = tri,
+                                Bary = new Vector3(b0, b1, b2),
+                            };
+                        }
+                    }
+                }
+            }
+            for (int k = 0; k < count; k++)
+            {
+                if (GridDepth[k] > float.NegativeInfinity) found[k] = true;
+                else if (GridOtherDepth[k] > float.NegativeInfinity)
+                {
+                    GridHits[k] = GridOther[k];
+                    found[k] = true;
+                }
             }
         }
 
@@ -728,21 +1146,45 @@ namespace RealTargets.Gore
         /// </summary>
         internal static bool StainAffordable => _bakeFrame != Time.frameCount || _bakeMsFrame < StainBakeBudgetMs;
 
-        /// <summary>Bakes one pending mesh into a collider (cooking is the expensive part); returns its part index.</summary>
+        /// <summary>Bakes one pending skin at its current pose for the surface rays; returns its part index.</summary>
         private static int BakePending(Baked baked, int index)
         {
+            using var part = RealTargets.Diagnostics.Perf.Part(RealTargets.Diagnostics.PerfPart.BodyBake);
             var smr = baked.Pending[index];
             baked.Pending.RemoveAt(index);
             var watch = System.Diagnostics.Stopwatch.StartNew();
-            var mesh = new Mesh();
-            // BakeMesh(true) is fully local (scale divided out): the collider takes the skin's whole transform, scale too
-            // (release check 5: a BEAR Tiger T-shirt at scale 0.1 baked 10x and wounds on it landed off the shirt).
-            smr.BakeMesh(mesh, true);
-            var go = new GameObject(Prefix + "Bake") { hideFlags = HideFlags.HideAndDontSave };
-            go.transform.SetPositionAndRotation(smr.transform.position, smr.transform.rotation);
-            go.transform.localScale = smr.transform.lossyScale;
-            var collider = go.AddComponent<MeshCollider>();
-            collider.sharedMesh = mesh;
+            if (_scratch == null) _scratch = new Mesh { name = Prefix + "Bake", hideFlags = HideFlags.HideAndDontSave };
+            var mesh = _scratch;
+            using (RealTargets.Diagnostics.Perf.Part(RealTargets.Diagnostics.PerfPart.BodySkin))
+            {
+                // BakeMesh(true) is fully local (scale divided out): the rays go through the skin's whole transform, scale too
+                // (release check 5: a BEAR Tiger T-shirt at scale 0.1 baked 10x and wounds on it landed off the shirt).
+                smr.BakeMesh(mesh, true);
+            }
+            var source = smr.sharedMesh;
+            var vertices = VertexLists.Count > 0 ? VertexLists.Pop() : new List<Vector3>();
+            Topology topo;
+            using (RealTargets.Diagnostics.Perf.Part(RealTargets.Diagnostics.PerfPart.BodyCopy))
+            {
+                mesh.GetVertices(vertices);
+                topo = TopologyOf(source, mesh, vertices);
+            }
+            var triangles = topo.Triangles;
+            var min = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+            var max = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+            for (int v = 0; v < vertices.Count; v++)
+            {
+                var p = vertices[v];
+                if (p.x < min.x) min.x = p.x;
+                if (p.y < min.y) min.y = p.y;
+                if (p.z < min.z) min.z = p.z;
+                if (p.x > max.x) max.x = p.x;
+                if (p.y > max.y) max.y = p.y;
+                if (p.z > max.z) max.z = p.z;
+            }
+            var t = smr.transform;
+            var scale = t.lossyScale;
+            var toWorld = Matrix4x4.TRS(t.position, t.rotation, scale);
             double ms = watch.Elapsed.TotalMilliseconds;
             if (_bakeFrame != Time.frameCount)
             {
@@ -753,20 +1195,23 @@ namespace RealTargets.Gore
             // 0.10.12 normal raid: `Bleed` worst frames of 10-19 ms remained; this names the meshes behind them.
             if (ms >= 4.0 && Plugin.PerfLogging)
             {
-                Plugin.Log.LogInfo($"[Perf] slow bake {ms:F1} ms: {baked.Player?.Profile?.Nickname} {smr.name} ({mesh.vertexCount} verts, " +
+                Plugin.Log.LogInfo($"[Perf] slow bake {ms:F1} ms: {baked.Player?.Profile?.Nickname} {smr.name} ({vertices.Count} verts, " +
                                    $"{(baked.Player != null && baked.Player.HealthController != null && baked.Player.HealthController.IsAlive ? "alive" : "corpse")})");
             }
             baked.Parts.Add(new BakedPart
             {
-                Go = go, Mesh = mesh, Collider = collider, Source = smr, SourceMesh = smr.sharedMesh, SourcePosition = smr.transform.position,
+                Source = smr, SourceMesh = source, SourcePosition = t.position, Vertices = vertices, Triangles = triangles, Topo = topo,
+                ToWorld = toWorld, ToLocal = toWorld.inverse, Mirrored = scale.x * scale.y * scale.z < 0f, Min = min, Max = max,
             });
             return baked.Parts.Count - 1;
         }
 
-        /// <summary>End of the frame: colliders off; bakes unused for a while (or over the cap, oldest first) destroyed.</summary>
+        /// <summary>End of the frame: bakes unused for a while (or over the cap, oldest first) destroyed.</summary>
         private IEnumerator CleanupAtEndOfFrame()
         {
             yield return new WaitForEndOfFrame();
+            // perf-4: was outside every timing scope (end of frame, after Perf's LateUpdate: counted in the next frame).
+            using var perf = RealTargets.Diagnostics.Perf.Measure(RealTargets.Diagnostics.PerfArea.Wounds);
             _cleanupQueued = false;
             List<int> drop = null;
             foreach (var pair in _baked)
@@ -775,11 +1220,7 @@ namespace RealTargets.Gore
                 if (b.Player == null || Time.time - b.LastUsed > BakeLifetime)
                 {
                     (drop ??= new List<int>()).Add(pair.Key);
-                    continue;
-                }
-                foreach (var part in b.Parts)
-                {
-                    if (part.Collider != null) part.Collider.enabled = false;
+                    _dropped[pair.Key] = $"bake unused for {Time.time - b.LastUsed:F1} s, dropped";
                 }
             }
             while (_baked.Count - (drop?.Count ?? 0) > MaxBakes)
@@ -796,6 +1237,7 @@ namespace RealTargets.Gore
                 }
                 if (oldest < 0) break;
                 (drop ??= new List<int>()).Add(oldest);
+                _dropped[oldest] = $"more than {MaxBakes} bodies baked, the oldest dropped";
             }
             if (drop == null) yield break;
             foreach (int id in drop)
@@ -809,14 +1251,16 @@ namespace RealTargets.Gore
         {
             foreach (var b in _baked.Values) DestroyBake(b);
             _baked.Clear();
+            _dropped.Clear();
         }
 
         private static void DestroyBake(Baked baked)
         {
+            using var timing = RealTargets.Diagnostics.Perf.Part(RealTargets.Diagnostics.PerfPart.BakeDestroy);
             foreach (var part in baked.Parts)
             {
-                if (part.Go != null) DestroyImmediate(part.Go);
-                if (part.Mesh != null) DestroyImmediate(part.Mesh);
+                if (part.Vertices != null && VertexLists.Count < 64) VertexLists.Push(part.Vertices);
+                part.Vertices = null;
             }
             baked.Parts.Clear();
             baked.Pending.Clear();
@@ -830,8 +1274,10 @@ namespace RealTargets.Gore
         /// exactly on the surface and then deforms like the cloth. Points that find no surface
         /// (patch overhanging an edge) are transparent.
         /// </summary>
-        private bool SpawnSkinned(Player player, Baked baked, SurfaceHit center, float size, PatchKind kind, Vector3? axis)
+        private bool SpawnSkinned(Player player, Baked baked, SurfaceHit center, float size, PatchKind kind, Vector3? axis,
+            int cell = 0, float aspect = 1f, bool mirror = false)
         {
+            using var timing = RealTargets.Diagnostics.Perf.Part(RealTargets.Diagnostics.PerfPart.SpawnPatch);
             var centreWeights = Weights(baked, center);
             if (centreWeights == null) return false;
 
@@ -850,6 +1296,7 @@ namespace RealTargets.Gore
             }
             var b = Vector3.Cross(n, t);
             float half = size * Random.Range(0.9f, 1.15f) * 0.5f;
+            float halfU = half * aspect;
             float lift = LiftFor(kind);
 
             int count = Grid * Grid;
@@ -857,18 +1304,17 @@ namespace RealTargets.Gore
             var normals = new Vector3[count];
             var colors = new Color32[count];
             var vertexWeights = new List<(Transform bone, float w)>[count];
+            // Each point dropped onto the surface along -n from 4 cm above (the centre's skin first, else any baked one).
+            LayGrid(baked, center.Part, center.Point, t, b, n, halfU, half, GridFound);
             for (int j = 0; j < Grid; j++)
             {
                 for (int i = 0; i < Grid; i++)
                 {
                     int k = j * Grid + i;
-                    var flat = center.Point + t * ((i / (float)(Grid - 1) - 0.5f) * 2f * half) + b * ((j / (float)(Grid - 1) - 0.5f) * 2f * half);
+                    var flat = center.Point + t * ((i / (float)(Grid - 1) - 0.5f) * 2f * halfU) + b * ((j / (float)(Grid - 1) - 0.5f) * 2f * half);
                     List<(Transform, float)> w = null;
-                    if (Surface(baked, flat + n * 0.04f, -n, 0.08f, center.Part, out var on) ||
-                        Surface(baked, flat + n * 0.04f, -n, 0.08f, -1, out on, bake: false))
-                    {
-                        w = Weights(baked, on);
-                    }
+                    var on = GridHits[k];
+                    if (GridFound[k]) w = Weights(baked, on);
                     if (w != null)
                     {
                         world[k] = on.Point + on.Normal * lift;
@@ -937,6 +1383,7 @@ namespace RealTargets.Gore
                 LocalCentre = rootBone.InverseTransformPoint(center.Point),
                 Vertices = world,
                 Normals = normals,
+                Uvs = WoundTextures.CellUvs(cell, mirror, Grid),
                 Colors = colors,
                 Triangles = tris.ToArray(),
                 Weights = boneWeights,
@@ -1002,7 +1449,7 @@ namespace RealTargets.Gore
             {
                 batch.Vertices.Add(patch.Vertices[v]);
                 batch.Normals.Add(patch.Normals[v]);
-                batch.Uvs.Add(_gridUvs[v]);
+                batch.Uvs.Add(patch.Uvs[v]);
                 batch.Colors.Add(patch.Colors[v]);
                 var bw = patch.Weights[v];
                 // Unused slots (weight 0) point at bone 0, which every patch has.
@@ -1035,6 +1482,7 @@ namespace RealTargets.Gore
         /// <summary>Writes the batch's lists into its mesh; after a removal, rebuilds the lists from the live patches.</summary>
         private void Upload(PatchBatch batch)
         {
+            using var part = RealTargets.Diagnostics.Perf.Part(RealTargets.Diagnostics.PerfPart.PatchUpload);
             var mesh = batch.Mesh;
             var smr = batch.Renderer;
             if (batch.Rebuild)
@@ -1105,7 +1553,7 @@ namespace RealTargets.Gore
             }
             if (weights == null || weights.Length == 0) return null;
 
-            if (part.Triangles == null) part.Triangles = part.Mesh.triangles;
+            if (part.Triangles == null) return null;
             int t = at.Triangle * 3;
             if (at.Triangle < 0 || t + 2 >= part.Triangles.Length) return null;
 
@@ -1144,7 +1592,7 @@ namespace RealTargets.Gore
 
         // ---- Flat patch (fallback) ---------------------------------------------------------------
 
-        private void Spawn(Player player, Transform bone, Vector3 at, Vector3 normal, float size, PatchKind kind)
+        private void Spawn(Player player, Transform bone, Vector3 at, Vector3 normal, float size, PatchKind kind, int cell = 0)
         {
             var go = new GameObject(Prefix);
             go.transform.SetParent(bone, true);
@@ -1157,7 +1605,11 @@ namespace RealTargets.Gore
             go.transform.localScale = new Vector3(s / Mathf.Max(lossy.x, 1e-4f), s / Mathf.Max(lossy.y, 1e-4f), s / Mathf.Max(lossy.z, 1e-4f));
             // The collider's own layer (HitCollider/Deadbody) may not be drawn: use the body mesh's layer.
             go.layer = BodyLayer(player, bone.gameObject.layer);
-            go.AddComponent<MeshFilter>().sharedMesh = _quad;
+            var quad = Object.Instantiate(_quad);
+            var cellUvs = WoundTextures.CellUvs(cell, false, 2);
+            quad.uv = new[] { cellUvs[0], cellUvs[1], cellUvs[3], cellUvs[2] };
+            go.AddComponent<OwnedMesh>().Mesh = quad;
+            go.AddComponent<MeshFilter>().sharedMesh = quad;
             var renderer = go.AddComponent<MeshRenderer>();
             renderer.sharedMaterials = Materials(kind);
             Shade(renderer);
@@ -1279,9 +1731,11 @@ namespace RealTargets.Gore
         /// with its long axis along the way blood runs. False when no surface is there (the stream
         /// ran off an edge or into a gap), so the caller stops extending that streak.
         /// </summary>
-        internal bool Stain(Player player, Vector3 at, Vector3 outward, float size, bool atWound)
+        internal bool Stain(Player player, Vector3 at, Vector3 outward, float size, bool atWound, BloodTone tone = BloodTone.Venous, int step = 0,
+            int cell = -1)
         {
             if (player == null || !Plugin.VisualsEnabled.Value) return false;
+            using var part = RealTargets.Diagnostics.Perf.Part(RealTargets.Diagnostics.PerfPart.Stains);
             EnsureResources();
             if (_stain == null && _stainColour == null) return false;
 
@@ -1293,7 +1747,7 @@ namespace RealTargets.Gore
             if (!atWound && (depth < back - 0.06f || depth > back + 0.08f)) return false;
 
             var run = Vector3.ProjectOnPlane(Vector3.down, on.Normal);
-            return SpawnSkinned(player, baked, on, size, PatchKind.Stain, run.sqrMagnitude > 0.04f ? run : (Vector3?)null);
+            return SpawnSkinned(player, baked, on, size, PatchKind.Stain, run.sqrMagnitude > 0.04f ? run : (Vector3?)null, cell >= 0 ? cell : WoundTextures.StainCell(tone, step));
         }
 
         private static int BodyLayer(Player player, int fallback)
@@ -1315,9 +1769,9 @@ namespace RealTargets.Gore
         internal void Warm() => EnsureResources();
 
         /// <summary>
-        /// Bakes, cooks and ray-casts a real body once (your own, at spawn), then throws it away: rc-1 test, the raid's
-        /// first hit spent 15.3 ms in "surfaces and patches" baking and cooking a body's skins on demand, later bodies far
-        /// less, and warming a 12-triangle box at load changed nothing. Returns the ms it took.
+        /// Bakes and ray-casts a real body once (your own, at spawn), then throws it away: rc-1 test, the raid's first hit
+        /// spent 15.3 ms in "surfaces and patches" baking and cooking a body's skins on demand, later bodies far less, and
+        /// warming a 12-triangle box at load changed nothing. Returns the ms it took.
         /// </summary>
         internal double WarmBody(Player player)
         {
@@ -1328,10 +1782,149 @@ namespace RealTargets.Gore
             while (baked.Pending.Count > 0) BakePending(baked, baked.Pending.Count - 1);
             var top = player.Position + Vector3.up * 2.5f;
             Surface(baked, top, Vector3.down, 3f, -1, out _, bake: false);
+            double ms = watch.Elapsed.TotalMilliseconds;
+#if !PUBLIC
+            SelfCheck(baked);
+#endif
             _baked.Remove(player.Id);
             DestroyBake(baked);
-            return watch.Elapsed.TotalMilliseconds;
+            return ms;
         }
+
+#if !PUBLIC
+        /// <summary>
+        /// Dev check of perf-6's own ray test against PhysX on your body at spawn: per baked skin a MeshCollider from the same
+        /// vertices, 40 rays at random triangles (from 20 cm out, random side); both must hit the same point (1 mm), with the
+        /// same normal, or both miss. One `[Surface] self-check` line.
+        /// </summary>
+        private static void SelfCheck(Baked baked)
+        {
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            int rays = 0, agree = 0, bothMiss = 0;
+            float worst = 0f;
+            string first = null;
+            var state = Random.state;
+            Random.InitState(1234);
+            for (int i = 0; i < baked.Parts.Count; i++)
+            {
+                var part = baked.Parts[i];
+                if (part.Vertices == null || part.Triangles == null || part.Triangles.Length < 3) continue;
+                var mesh = new Mesh { hideFlags = HideFlags.HideAndDontSave };
+                if (part.Vertices.Count > 65535) mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+                mesh.SetVertices(part.Vertices);
+                mesh.SetTriangles(part.Triangles, 0);
+                var go = new GameObject(Prefix + "SelfCheck") { hideFlags = HideFlags.HideAndDontSave };
+                go.transform.SetPositionAndRotation(part.ToWorld.GetColumn(3), part.ToWorld.rotation);
+                go.transform.localScale = part.ToWorld.lossyScale;
+                var collider = go.AddComponent<MeshCollider>();
+                collider.sharedMesh = mesh;
+                Physics.SyncTransforms();
+                int tris = part.Triangles.Length / 3;
+                for (int r = 0; r < 40; r++)
+                {
+                    int k = Random.Range(0, tris) * 3;
+                    var centre = part.ToWorld.MultiplyPoint3x4((part.Vertices[part.Triangles[k]] + part.Vertices[part.Triangles[k + 1]] +
+                                                                part.Vertices[part.Triangles[k + 2]]) / 3f);
+                    var side = Random.onUnitSphere;
+                    var ray = new Ray(centre + side * 0.2f, -side);
+                    rays++;
+                    bool physx = collider.Raycast(ray, out var hit, 0.4f);
+                    float best = float.MaxValue;
+                    var ours = default(SurfaceHit);
+                    ours.Part = -1;
+                    Test(baked, i, ray, 0.4f, ref best, ref ours);
+                    bool mine = ours.Part == i;
+                    if (!physx && !mine)
+                    {
+                        agree++;
+                        bothMiss++;
+                        continue;
+                    }
+                    if (physx && mine)
+                    {
+                        float diff = Vector3.Distance(hit.point, ours.Point);
+                        var physxNormal = Vector3.Dot(hit.normal, ray.direction) > 0f ? -hit.normal : hit.normal;
+                        if (diff > worst) worst = diff;
+                        if (diff < 0.001f && Vector3.Dot(physxNormal, ours.Normal) > 0.99f)
+                        {
+                            agree++;
+                            continue;
+                        }
+                    }
+                    first ??= $"{part.Source?.name}: PhysX {(physx ? $"{hit.point} tri {hit.triangleIndex}" : "miss")}, ours " +
+                              $"{(mine ? $"{ours.Point} tri {ours.Triangle}" : "miss")}";
+                }
+                Object.DestroyImmediate(go);
+                Object.DestroyImmediate(mesh);
+            }
+            // perf-7: a patch grid in one pass (LayGrid) against its 25 points cast one by one as before (Surface).
+            int points = 0, same = 0, patches = 0;
+            float gridWorst = 0f;
+            string gridFirst = null;
+            var found = new bool[Grid * Grid];
+            var gridWatch = System.Diagnostics.Stopwatch.StartNew();
+            double layMs = 0;
+            for (int attempt = 0; attempt < 200 && patches < 30; attempt++)
+            {
+                int pi = Random.Range(0, baked.Parts.Count);
+                var part = baked.Parts[pi];
+                if (part.Vertices == null || part.Triangles == null || part.Triangles.Length < 3) continue;
+                int k3 = Random.Range(0, part.Triangles.Length / 3) * 3;
+                var wa = part.ToWorld.MultiplyPoint3x4(part.Vertices[part.Triangles[k3]]);
+                var wb = part.ToWorld.MultiplyPoint3x4(part.Vertices[part.Triangles[k3 + 1]]);
+                var wc = part.ToWorld.MultiplyPoint3x4(part.Vertices[part.Triangles[k3 + 2]]);
+                var face = Vector3.Cross(wb - wa, wc - wa);
+                if (face.sqrMagnitude < 1e-12f) continue;
+                face.Normalize();
+                var mid = (wa + wb + wc) / 3f;
+                if (!Surface(baked, mid + face * 0.05f, -face, 0.1f, -1, out var center, bake: false)) continue;
+                patches++;
+                var n = center.Normal.normalized;
+                var t = Vector3.Cross(n, Mathf.Abs(n.y) < 0.95f ? Vector3.up : Vector3.right).normalized;
+                t = Quaternion.AngleAxis(Random.Range(0f, 360f), n) * t;
+                var b = Vector3.Cross(n, t);
+                float half = Random.Range(0.02f, 0.1f), halfU = half * Random.Range(0.6f, 2f);
+                var lay = System.Diagnostics.Stopwatch.StartNew();
+                LayGrid(baked, center.Part, center.Point, t, b, n, halfU, half, found);
+                layMs += lay.Elapsed.TotalMilliseconds;
+                for (int j = 0; j < Grid; j++)
+                {
+                    for (int i = 0; i < Grid; i++)
+                    {
+                        int k = j * Grid + i;
+                        var flat = center.Point + t * ((i / (float)(Grid - 1) - 0.5f) * 2f * halfU) + b * ((j / (float)(Grid - 1) - 0.5f) * 2f * half);
+                        bool cast = Surface(baked, flat + n * 0.04f, -n, 0.08f, center.Part, out var on) ||
+                                    Surface(baked, flat + n * 0.04f, -n, 0.08f, -1, out on, bake: false);
+                        points++;
+                        if (!cast && !found[k])
+                        {
+                            same++;
+                            continue;
+                        }
+                        if (cast && found[k])
+                        {
+                            float diff = Vector3.Distance(on.Point, GridHits[k].Point);
+                            if (diff > gridWorst) gridWorst = diff;
+                            if (diff < 0.001f && on.Part == GridHits[k].Part)
+                            {
+                                same++;
+                                continue;
+                            }
+                        }
+                        gridFirst ??= $"{part.Source?.name} point {k}: rays {(cast ? $"part {on.Part} tri {on.Triangle} {on.Point}" : "miss")}, " +
+                                      $"grid {(found[k] ? $"part {GridHits[k].Part} tri {GridHits[k].Triangle} {GridHits[k].Point}" : "miss")}";
+                    }
+                }
+            }
+            Random.state = state;
+            Plugin.Log.LogInfo($"[Surface] self-check: {agree}/{rays} rays agree with PhysX ({bothMiss} both miss), worst point " +
+                               $"{worst * 1000f:F2} mm, backfaces {Physics.queriesHitBackfaces}, {watch.Elapsed.TotalMilliseconds:F1} ms" +
+                               (first != null ? $"; first mismatch {first}" : string.Empty));
+            Plugin.Log.LogInfo($"[Surface] grid self-check: {same}/{points} points of {patches} patches agree with single rays, worst " +
+                               $"{gridWorst * 1000f:F2} mm, one pass {layMs / Mathf.Max(1, patches):F3} ms per patch, " +
+                               $"{gridWatch.Elapsed.TotalMilliseconds:F1} ms" + (gridFirst != null ? $"; first mismatch {gridFirst}" : string.Empty));
+        }
+#endif
 
         private void EnsureResources()
         {
@@ -1346,11 +1939,6 @@ namespace RealTargets.Gore
             _quad.normals = new[] { Vector3.forward, Vector3.forward, Vector3.forward, Vector3.forward };
             _quad.RecalculateBounds();
 
-            _gridUvs = new Vector2[Grid * Grid];
-            for (int j = 0; j < Grid; j++)
-            {
-                for (int i = 0; i < Grid; i++) _gridUvs[j * Grid + i] = new Vector2(i / (float)(Grid - 1), j / (float)(Grid - 1));
-            }
             _gridTriangles = new int[(Grid - 1) * (Grid - 1) * 6];
             int k = 0;
             for (int j = 0; j < Grid - 1; j++)
@@ -1406,11 +1994,13 @@ namespace RealTargets.Gore
                 _exitColour.renderQueue = 3001;
             }
             // Lit colour pass: same textures as albedo, glossy (wet); stains under the holes.
-            _entryLit = LitBlood.Transparent(entryTex, new Color(1f, 1f, 1f, 0.9f), 0.7f, 3001, "RealTargetsWoundEntryLit");
+            // 1.2.0: the entry is mostly scraped skin (abrasion margin), only the hole is wet: less gloss than 0.7.
+            _entryLit = LitBlood.Transparent(entryTex, new Color(1f, 1f, 1f, 0.9f), 0.45f, 3001, "RealTargetsWoundEntryLit", 0.35f, BloodSurface.Bodies);
             // Less gloss than a wound: torn fabric, only its soaked ring is wet.
-            _punctLit = LitBlood.Transparent(punctTex, new Color(1f, 1f, 1f, 0.9f), 0.35f, 3001, "RealTargetsWoundPunctureLit");
-            _exitLit = LitBlood.Transparent(exitTex, new Color(1f, 1f, 1f, 0.9f), 0.7f, 3001, "RealTargetsWoundExitLit");
-            _stainLit = LitBlood.Transparent(stainTex, new Color(1f, 1f, 1f, 0.85f), 0.5f, 2996, "RealTargetsWoundStainLit", 0.3f);
+            _punctLit = LitBlood.Transparent(punctTex, new Color(1f, 1f, 1f, 0.9f), 0.3f, 3001, "RealTargetsWoundPunctureLit", 0.35f, BloodSurface.Bodies);
+            _exitLit = LitBlood.Transparent(exitTex, new Color(1f, 1f, 1f, 0.9f), 0.6f, 3001, "RealTargetsWoundExitLit", 0.35f, BloodSurface.Bodies);
+            // blood-1: soaked fabric is not glossy (0.5 shone under torches).
+            _stainLit = LitBlood.Transparent(stainTex, new Color(1f, 1f, 1f, 0.85f), 0.25f, 2996, "RealTargetsWoundStainLit", 0.3f, BloodSurface.Bodies);
             ShaderName = $"{(_entry != null ? multiplyName : "-")} + {(_entryColour != null ? blendedName : "-")} + lit {LitBlood.TransparentName}";
             Plugin.Log.LogInfo($"Wound decals: shaders {ShaderName}, mode {Plugin.DecalShader.Value}, {GroundBlood.SoftParticleState()}");
         }
@@ -1473,102 +2063,421 @@ namespace RealTargets.Gore
         }
     }
 
-    /// <summary>Procedural wound textures (128 px RGBA, alpha = coverage).</summary>
+    /// <summary>
+    /// Procedural wound textures (1.2.0 realism pass): each kind is a 2x2 atlas of 128 px cells (alpha = coverage; the lit
+    /// cutout shader draws above ~0.35, so soft halos are left out on purpose and crusts are speckled instead).
+    /// A Forge user: holes "look unrealistic and star like (real holes don't really do that)"; until 1.1.0 every exit was
+    /// the same 6-pointed star from one seed and every entry the same red disc with a wide bright halo. Now, after
+    /// forensic descriptions of gunshot wounds:
+    /// - skin entry: a small round hole a little under the bullet's size (skin closes back), edges turned in, a narrow
+    ///   reddish-brown margin of abrasion; concentric when square-on, eccentric (wider on the side the bullet came from,
+    ///   the patch stretched 1/cos of the angle) when oblique; a slightly torn variant; a jagged one for fragments.
+    ///   Almost no blood on it: the bleeding's stains bring that;
+    /// - skin exit: larger, irregular, edges everted, no abrasion margin; slit-like (most pistol exits), irregular,
+    ///   stellate with uneven arms, or a ragged crater with torn muscle and some fat for rifle energy;
+    /// - fabric: an entry puncture (round, or a cross-shaped tear as woven cloth often splits) with the grey-black bullet
+    ///   wipe ring; an exit tear (ragged, or a slit) with fibres pushed outward; both soaking dark;
+    /// - stains: two venous runs, a brighter arterial one with spatter, and a frothy lung one (pink foam, bubbles).
+    /// Cells are picked per wound (EntryCell, ExitCell, PunctureCell, StainCell) and mapped by CellUvs.
+    /// </summary>
     internal static class WoundTextures
     {
-        private const int Size = 128;
+        private const int Cell = 128;
 
-        /// <summary>Entry: dark round hole (r 0.18), abrasion collar, thin blood halo.</summary>
-        internal static Texture2D Entry()
-        {
-            var rng = new System.Random(1234);
-            return Make((x, y, r, a) =>
-            {
-                float n = Noise(x * 9f, y * 9f, rng);
-                float hole = 0.18f + 0.015f * Mathf.Sin(a * 5f + 1.3f);
-                if (r < hole * 0.75f) return new Color(0.03f, 0.005f, 0.005f, 1f);
-                if (r < hole) return Color.Lerp(new Color(0.03f, 0.005f, 0.005f, 1f), new Color(0.22f, 0.03f, 0.02f, 1f), (r - hole * 0.75f) / (hole * 0.25f));
-                if (r < hole + 0.07f) return new Color(0.36f, 0.09f, 0.06f, 1f) * (0.85f + 0.3f * n);
-                float halo = 1f - Mathf.InverseLerp(hole + 0.07f, 0.5f + 0.08f * n, r);
-                return new Color(0.42f, 0.03f, 0.03f, Mathf.Clamp01(halo * 0.9f * (0.6f + 0.6f * n)));
-            });
-        }
+        /// <summary>Entry: hole radius and hole + margin radius, in cell units (patch side = outer diameter / (2 x EntryOuter)).</summary>
+        internal const float EntryHole = 0.12f;
+        internal const float EntryOuter = 0.165f;
+        /// <summary>Exit: the opening's reach in cell units (patch side = exit size / (2 x ExitReach)).</summary>
+        internal const float ExitReach = 0.30f;
+        /// <summary>Fabric: hole reach for entries, tear reach for exits.</summary>
+        internal const float PunctureHole = 0.13f;
+        internal const float PunctureTear = 0.22f;
 
-        /// <summary>
-        /// Puncture (1.1.0 retest 4): a round through fabric or gear. A black hole (r ~0.16) with a frayed edge of torn
-        /// fibres and a dark wet ring where blood soaked the cloth around it; no bright red halo. The bleeding's stains
-        /// add the blood that runs from it.
-        /// </summary>
-        internal static Texture2D Puncture()
-        {
-            var rng = new System.Random(2468);
-            return Make((x, y, r, a) =>
-            {
-                float n = Noise(x * 11f, y * 11f, rng);
-                float edge = 0.16f + 0.025f * Mathf.Sin(a * 7f + 0.4f) + 0.015f * Mathf.Sin(a * 13f) + 0.02f * n;
-                if (r < edge * 0.7f) return new Color(0.02f, 0.012f, 0.01f, 1f);
-                if (r < edge) return Color.Lerp(new Color(0.02f, 0.012f, 0.01f, 1f), new Color(0.09f, 0.04f, 0.035f, 1f), (r - edge * 0.7f) / (edge * 0.3f));
-                // Torn fibres: thin dark streaks sticking out past the edge.
-                float fibre = Mathf.Pow(Mathf.Abs(Mathf.Sin(a * 17f + 2.1f * n)), 18f);
-                if (r < edge + 0.05f + 0.06f * fibre) return new Color(0.13f, 0.06f, 0.05f, 0.95f) * (0.85f + 0.3f * n);
-                float soak = 1f - Mathf.InverseLerp(edge + 0.05f, 0.34f + 0.08f * n, r);
-                return new Color(0.2f, 0.03f, 0.025f, Mathf.Clamp01(soak * 0.85f * (0.7f + 0.5f * n)));
-            });
-        }
+        // ---- Atlases ------------------------------------------------------------------------------
 
-        /// <summary>Exit: ragged stellate tear (r ~0.30 with 6 lobes), everted torn edges, blood around.</summary>
-        internal static Texture2D Exit()
-        {
-            var rng = new System.Random(4321);
-            return Make((x, y, r, a) =>
-            {
-                float n = Noise(x * 7f, y * 7f, rng);
-                float tear = 0.24f + 0.09f * Mathf.Pow(Mathf.Abs(Mathf.Sin(a * 3f + 0.7f)), 3f) + 0.04f * Mathf.Sin(a * 11f) + 0.03f * n;
-                if (r < tear * 0.6f) return new Color(0.07f, 0.0f, 0.0f, 1f);
-                if (r < tear) return Color.Lerp(new Color(0.25f, 0.02f, 0.02f, 1f), new Color(0.62f, 0.16f, 0.15f, 1f), (r - tear * 0.6f) / (tear * 0.4f)) * (0.8f + 0.4f * n);
-                if (r < tear + 0.05f) return new Color(0.5f, 0.1f, 0.09f, 1f);
-                float halo = 1f - Mathf.InverseLerp(tear + 0.05f, 0.5f, r);
-                float speck = n > 0.72f && r < 0.5f ? 0.9f : halo * 0.85f;
-                return new Color(0.4f, 0.02f, 0.02f, Mathf.Clamp01(speck));
-            });
-        }
+        internal static Texture2D Entry() => Atlas(EntryCellShade);
+        internal static Texture2D Exit() => Atlas(ExitCellShade);
+        internal static Texture2D Puncture() => Atlas(PunctureCellShade);
+        internal static Texture2D Stain() => Atlas(StainCellShade);
 
-        /// <summary>
-        /// Stain (0.10.0): a soaked, irregular blot stretched along +U (the way blood runs), wetter
-        /// and darker in the middle, a few runs at the leading edge, ragged soft rim.
-        /// </summary>
-        internal static Texture2D Stain()
+        /// <summary>UVs of a 5x5 patch grid on atlas cell <paramref name="cell"/>; <paramref name="mirror"/> flips it across +U.</summary>
+        internal static Vector2[] CellUvs(int cell, bool mirror, int grid)
         {
-            var rng = new System.Random(777);
-            return Make((x, y, r, a) =>
+            var uvs = new Vector2[grid * grid];
+            float cx = (cell & 1) * 0.5f, cy = (cell >> 1) * 0.5f;
+            const float inset = 0.004f;
+            for (int j = 0; j < grid; j++)
             {
-                float n = Noise(x * 8f + 3f, y * 8f + 1f, rng);
-                // Ellipse: long along x, with fingers running toward +x.
-                float ex = x / 0.5f, ey = y / 0.3f;
-                float e = Mathf.Sqrt(ex * ex + ey * ey);
-                float finger = x > 0.05f ? 0.25f * Mathf.Pow(Mathf.Abs(Mathf.Sin(y * 22f + 1.7f)), 6f) * (x / 0.5f) : 0f;
-                float edge = 0.78f + 0.2f * n + finger;
-                if (e > edge) return new Color(0f, 0f, 0f, 0f);
-                float soft = Mathf.Clamp01((edge - e) / 0.18f);
-                float wet = Mathf.Clamp01(1f - e / edge);
-                var col = Color.Lerp(new Color(0.45f, 0.04f, 0.035f), new Color(0.3f, 0.015f, 0.015f), wet);
-                col.a = Mathf.Clamp01(soft * (0.7f + 0.3f * n) * 0.95f);
-                return col;
-            });
-        }
-
-        private static Texture2D Make(System.Func<float, float, float, float, Color> shade)
-        {
-            var tex = new Texture2D(Size, Size, TextureFormat.RGBA32, true) { wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Trilinear, hideFlags = HideFlags.HideAndDontSave };
-            var pixels = new Color[Size * Size];
-            for (int j = 0; j < Size; j++)
-            {
-                for (int i = 0; i < Size; i++)
+                for (int i = 0; i < grid; i++)
                 {
-                    float x = (i + 0.5f) / Size - 0.5f, y = (j + 0.5f) / Size - 0.5f;
-                    float r = Mathf.Sqrt(x * x + y * y);
-                    var c = r > 0.5f ? new Color(0f, 0f, 0f, 0f) : shade(x, y, r, Mathf.Atan2(y, x));
-                    pixels[j * Size + i] = c;
+                    float u = i / (float)(grid - 1), v = j / (float)(grid - 1);
+                    if (mirror) v = 1f - v;
+                    uvs[j * grid + i] = new Vector2(cx + inset + u * (0.5f - 2f * inset), cy + inset + v * (0.5f - 2f * inset));
+                }
+            }
+            return uvs;
+        }
+
+        // ---- Picking a cell -----------------------------------------------------------------------
+
+        /// <summary>How much an oblique entry stretches along the shot: 1/cos of the angle to the surface normal (max 2.3).</summary>
+        internal static float EntryAspect(Vector3 dir, Vector3 normal)
+        {
+            float cos = Mathf.Abs(Vector3.Dot(dir.normalized, normal.normalized));
+            return Mathf.Clamp(1f / Mathf.Max(cos, 0.43f), 1f, 2.3f);
+        }
+
+        /// <summary>Skin entry cell: 3 fragment (jagged), 1 eccentric (oblique), 2 slightly torn (big bore, sometimes), 0 clean round.</summary>
+        internal static int EntryCell(bool fragment, float calibreMm, float aspect)
+        {
+            if (fragment) return 3;
+            if (aspect > 1.15f) return 1;
+            return calibreMm >= 9f && Random.value < 0.5f ? 2 : 0;
+        }
+
+        /// <summary>Skin exit cell by energy: pistol mostly slit-like, rifle irregular or stellate, high energy or a burst a ragged crater.</summary>
+        internal static int ExitCell(float energy, bool burst)
+        {
+            float x = Random.value;
+            if (burst || energy > 2600f) return x < 0.7f ? 3 : 2;
+            if (energy > 1200f) return x < 0.4f ? 1 : x < 0.75f ? 2 : 3;
+            if (energy > 600f) return x < 0.45f ? 0 : x < 0.8f ? 1 : 2;
+            return x < 0.65f ? 0 : 1;
+        }
+
+        /// <summary>Fabric cell: entries 0 round / 1 cross tear, exits 2 ragged / 3 slit.</summary>
+        internal static int PunctureCell(bool exit) => exit ? (Random.value < 0.6f ? 2 : 3) : (Random.value < 0.65f ? 0 : 1);
+
+        /// <summary>Stain cell: venous 0, arterial 2, a lung wound frothy at the wound (first steps) and bright below; 1 = soak blot.</summary>
+        internal static int StainCell(BloodTone tone, int step)
+        {
+            switch (tone)
+            {
+                case BloodTone.Arterial: return 2;
+                case BloodTone.Pulmonary: return step < 4 ? 3 : 2;
+                default: return 0;
+            }
+        }
+
+        /// <summary>The round soak blot (stain cell 1): a body lying in blood, a hole facing straight up or down.</summary>
+        internal const int SoakCell = 1;
+
+        // ---- Skin entry ---------------------------------------------------------------------------
+
+        private static Color EntryCellShade(int cell, float x, float y, float r, float a)
+        {
+            float seed = 17.3f * (cell + 1);
+            float n = Noise(x * 14f + seed, y * 14f - seed);
+            float fine = Noise(x * 40f - seed, y * 40f + seed * 0.5f);
+            float hole = EntryHole;
+            float collar = 0.032f + 0.012f * (n - 0.5f);
+            switch (cell)
+            {
+                case 0: // clean, concentric
+                    hole *= 1f + 0.035f * Mathf.Sin(a * 3f + seed) + 0.03f * (fine - 0.5f);
+                    break;
+                case 1: // oblique: wide margin on the side it came from (-U)
+                    hole *= 1f + 0.04f * Mathf.Sin(a * 2f + seed) + 0.03f * (fine - 0.5f);
+                    collar += 0.05f * Mathf.Pow(Mathf.Max(0f, -Mathf.Cos(a)), 1.4f);
+                    break;
+                case 2: // slightly torn: a few short splits out of the hole
+                    hole *= 1.08f + 0.04f * Mathf.Sin(a * 3f + seed);
+                    float split = Mathf.Pow(Mathf.Max(0f, Mathf.Cos(a * 3f + 0.9f)), 30f) + 0.6f * Mathf.Pow(Mathf.Max(0f, Mathf.Cos(a * 2f - 1.7f)), 40f);
+                    hole += 0.055f * split;
+                    collar *= 1f - 0.6f * split;
+                    break;
+                default: // fragment: jagged, irregular margin
+                    hole *= 1.05f + 0.16f * (Noise(Mathf.Cos(a) * 2.2f + seed, Mathf.Sin(a) * 2.2f) - 0.5f) + 0.08f * (fine - 0.5f) +
+                            0.05f * Mathf.Sin(a * 7f + seed);
+                    collar = 0.02f + 0.045f * Noise(Mathf.Cos(a) * 3f - seed, Mathf.Sin(a) * 3f + seed);
+                    break;
+            }
+            if (r < hole * 0.72f) return BloodPalette.WoundTrack;
+            // The edge is turned in: a wet, dark red lip down into the track.
+            if (r < hole) return Color.Lerp(BloodPalette.WoundTrack, new Color(0.15f, 0.026f, 0.024f), (r - hole * 0.72f) / (hole * 0.28f));
+            if (r < hole + collar)
+            {
+                float t = (r - hole) / Mathf.Max(collar, 1e-3f);
+                var c = Color.Lerp(BloodPalette.Abrasion * 0.72f, BloodPalette.Abrasion, Mathf.Sqrt(t)) * (0.86f + 0.28f * fine);
+                c.a = 1f;
+                return c;
+            }
+            // A speckled crust of blood just outside the margin (cutout: some specks show).
+            float crust = r - hole - collar;
+            if (crust < 0.035f && fine * (1f - crust / 0.035f) > 0.42f) return new Color(0.19f, 0.03f, 0.03f, 0.8f);
+            return Clear;
+        }
+
+        // ---- Skin exit ----------------------------------------------------------------------------
+
+        private static Color ExitCellShade(int cell, float x, float y, float r, float a)
+        {
+            float seed = 31.7f * (cell + 1);
+            float n = Noise(x * 9f + seed, y * 9f - seed);
+            float fine = Noise(x * 34f - seed, y * 34f + seed);
+            float sd;
+            bool crater = cell == 3;
+            switch (cell)
+            {
+                case 0: // slit with two short side splits
+                {
+                    float main = Capsule(x, y, -0.27f, 0.02f, 0.27f, -0.02f, 0f) - Mathf.Lerp(0.05f, 0.012f, Mathf.Abs(x) / 0.3f);
+                    float s1 = Capsule(x, y, -0.09f, 0.0f, -0.13f, 0.09f, 0f) - 0.014f;
+                    float s2 = Capsule(x, y, 0.11f, -0.01f, 0.16f, -0.08f, 0f) - 0.012f;
+                    sd = Mathf.Min(main, Mathf.Min(s1, s2)) + 0.012f * (fine - 0.5f);
+                    break;
+                }
+                case 1: // irregular, lobed
+                {
+                    float R = 0.17f + 0.035f * Mathf.Sin(a * 2f + seed) + 0.025f * Mathf.Sin(a * 3f - seed * 0.7f) + 0.015f * Mathf.Sin(a * 5f + 1.1f);
+                    sd = r - R - 0.03f * (n - 0.5f) - 0.014f * (fine - 0.5f);
+                    break;
+                }
+                case 2: // stellate, uneven: a core and four arms of different length, width and spacing
+                {
+                    sd = r - 0.085f - 0.015f * (fine - 0.5f);
+                    float[] angles = { 0.3f, 1.75f, 3.4f, 4.6f };
+                    float[] lengths = { 0.27f, 0.17f, 0.23f, 0.13f };
+                    for (int k = 0; k < angles.Length; k++)
+                    {
+                        float ex = Mathf.Cos(angles[k]) * lengths[k], ey = Mathf.Sin(angles[k]) * lengths[k];
+                        float t = Mathf.Clamp01((x * ex + y * ey) / (lengths[k] * lengths[k]));
+                        float arm = Capsule(x, y, 0f, 0f, ex, ey, 0f) - Mathf.Lerp(0.05f, 0.008f, t);
+                        sd = Mathf.Min(sd, arm);
+                    }
+                    sd += 0.012f * (fine - 0.5f);
+                    break;
+                }
+                default: // ragged crater
+                {
+                    float R = 0.25f + 0.04f * Mathf.Sin(a * 2f + seed) + 0.03f * Mathf.Sin(a * 3f + 2.3f) + 0.02f * Mathf.Sin(a * 7f - seed);
+                    sd = r - R - 0.05f * (n - 0.5f) - 0.02f * (fine - 0.5f);
+                    break;
+                }
+            }
+
+            float rim = crater ? 0.034f : 0.022f;
+            if (sd < 0f)
+            {
+                float depth = Mathf.Clamp01(-sd / (crater ? 0.16f : 0.08f));
+                // Torn muscle: striated dark red, deeper = darker.
+                float fibre = Noise(x * 8f + seed, y * 46f - seed);
+                var c = Color.Lerp(BloodPalette.Muscle * (0.75f + 0.45f * fibre), BloodPalette.WoundTrack, Mathf.Pow(depth, 1.3f));
+                // Fat just under the skin edge of a torn (not slit) opening.
+                if ((cell == 1 || crater) && -sd < 0.018f && -sd > 0.006f && Noise(x * 15f - seed, y * 15f) > 0.7f) c = BloodPalette.Fat * (0.7f + 0.25f * fine);
+                c.a = 1f;
+                return c;
+            }
+            if (sd < rim)
+            {
+                // Everted skin edge, ragged (tags), bloodied.
+                if (sd > rim * (0.45f + 0.7f * fine)) return Clear;
+                var c = BloodPalette.TornSkin * (0.72f + 0.38f * n);
+                c.a = 1f;
+                return c;
+            }
+            float margin = sd - rim;
+            if (margin < 0.07f && n * (1f - margin / 0.07f) > 0.3f)
+            {
+                var c = Color.Lerp(BloodPalette.SoakWet, BloodPalette.VenousFilm, fine);
+                c.a = 0.85f;
+                return c;
+            }
+            return Clear;
+        }
+
+        // ---- Fabric -------------------------------------------------------------------------------
+
+        private static Color PunctureCellShade(int cell, float x, float y, float r, float a)
+        {
+            float seed = 53.1f * (cell + 1);
+            float n = Noise(x * 11f + seed, y * 11f - seed);
+            float fine = Noise(x * 36f - seed, y * 36f + seed);
+            bool exit = cell >= 2;
+            float sd;
+            switch (cell)
+            {
+                case 0:
+                    sd = r - PunctureHole * (1f + 0.12f * Mathf.Sin(a * 7f + 0.4f) + 0.08f * Mathf.Sin(a * 13f) + 0.12f * (n - 0.5f));
+                    break;
+                case 1: // cross-shaped split of the weave
+                {
+                    float c1 = Capsule(x, y, -0.15f, -0.15f, 0.15f, 0.15f, 0f) - 0.022f;
+                    float c2 = Capsule(x, y, -0.13f, 0.14f, 0.14f, -0.12f, 0f) - 0.02f;
+                    sd = Mathf.Min(Mathf.Min(c1, c2), r - 0.06f) + 0.01f * (fine - 0.5f);
+                    break;
+                }
+                case 2: // ragged exit tear (blood-3: harmonics 3 + 5 read as a heart every time): lobes from angular noise
+                    sd = r - PunctureTear * (1f + 0.55f * (Noise(Mathf.Cos(a) * 1.7f + seed, Mathf.Sin(a) * 1.7f - seed) - 0.5f) +
+                                             0.25f * (Noise(Mathf.Cos(a) * 4.5f - seed, Mathf.Sin(a) * 4.5f) - 0.5f) + 0.18f * (n - 0.5f));
+                    break;
+                default: // torn slit (blood-3: the clean "L" read geometric): a bent, uneven tear with a short side split, jagged
+                {
+                    float c1 = Capsule(x, y, -0.25f, -0.05f, -0.04f, 0.03f, 0f) - 0.03f;
+                    float c2 = Capsule(x, y, -0.04f, 0.03f, 0.16f, -0.02f, 0f) - 0.022f;
+                    float c3 = Capsule(x, y, 0.06f, 0.0f, 0.12f, -0.14f, 0f) - 0.012f;
+                    sd = Mathf.Min(c1, Mathf.Min(c2, c3)) + 0.03f * (Noise(x * 26f + seed, y * 26f) - 0.5f) + 0.014f * (fine - 0.5f);
+                    break;
+                }
+            }
+            if (sd < 0f)
+            {
+                // Looking through: the under-layer (entry) or the wound under the cloth (exit).
+                float depth = Mathf.Clamp01(-sd / 0.05f);
+                return exit ? Color.Lerp(new Color(0.15f, 0.025f, 0.022f, 1f), BloodPalette.WoundTrack, depth)
+                            : Color.Lerp(new Color(0.07f, 0.04f, 0.035f, 1f), new Color(0.02f, 0.012f, 0.01f, 1f), depth);
+            }
+            // Torn fibres: pushed in at an entry (short), out at an exit (longer, wetter).
+            // Frayed edge: irregular tufts (angular noise), not a regular comb of spikes.
+            float tuft = Noise(Mathf.Cos(a) * 5f + seed, Mathf.Sin(a) * 5f - seed) * 0.6f + Noise(Mathf.Cos(a) * 13f - seed, Mathf.Sin(a) * 13f) * 0.4f;
+            float fibre = Mathf.Pow(Mathf.Clamp01((tuft - 0.45f) / 0.4f), 2f);
+            float fibreLen = exit ? 0.018f + 0.05f * fibre : 0.012f + 0.03f * fibre;
+            if (sd < fibreLen)
+            {
+                // blood-2: the fibre band read as a bright red outline ring: fibres dark, wet, only partly covering.
+                if (Noise(x * 55f + seed, y * 55f) < 0.35f) return Clear;
+                var c = (exit ? new Color(0.085f, 0.018f, 0.017f) : new Color(0.07f, 0.04f, 0.034f)) * (0.85f + 0.3f * fine);
+                c.a = 0.95f;
+                return c;
+            }
+            // Bullet wipe: grey-black ring around an entry.
+            if (!exit && sd < fibreLen + 0.022f && fine > 0.25f)
+            {
+                var c = BloodPalette.BulletWipe * (0.85f + 0.3f * n);
+                c.a = 0.9f;
+                return c;
+            }
+            // Soak: blood wicking into the weave, dark, patchy toward its edge.
+            // Soak: wicking into the weave, dark, its edge breaking up into speckles (cutout: no soft edge otherwise).
+            float reach = exit ? 0.19f + 0.08f * n : 0.1f + 0.05f * n;
+            float soak = (sd - fibreLen) / reach;
+            float speck = Noise(x * 70f - seed, y * 70f + seed * 0.3f);
+            if (soak < 1f && Mathf.Pow(1f - soak, 1.4f) * (0.35f + 0.5f * fine + 0.45f * speck) > 0.42f)
+            {
+                var c = Color.Lerp(BloodPalette.SoakWet, BloodPalette.SoakEdge, soak);
+                c.a = 0.9f;
+                return c;
+            }
+            return Clear;
+        }
+
+        // ---- Stains -------------------------------------------------------------------------------
+
+        private static Color StainCellShade(int cell, float x, float y, float r, float a)
+        {
+            float seed = 71.9f * (cell + 1);
+            float n = Noise(x * 8f + seed, y * 8f - seed * 0.3f);
+            float fine = Noise(x * 30f - seed, y * 30f + seed);
+            // Ellipse long along +U (the way blood runs) with fingers at the leading edge.
+            // blood-1: kept well inside the patch (a run reaching the 5x5 grid edge was cut square) and tapering toward +U.
+            // blood-2: runs broke into beads (narrow, tapered ellipses 3 cm apart): less taper, longer; cell 1 (blood-3) is a
+            // round soak blot (a body lying in its blood, a hole facing up or down) instead of a second run.
+            bool blot = cell == 1;
+            float taper = blot ? 1f : Mathf.Lerp(1.08f, 0.82f, Mathf.Clamp01(x + 0.5f));
+            float ex = x / (blot ? 0.36f : 0.44f), ey = y / ((blot ? 0.36f : 0.24f) * taper);
+            float e = Mathf.Sqrt(ex * ex + ey * ey);
+            float fingers = !blot && x > 0.05f ? 0.22f * Mathf.Pow(Mathf.Abs(Mathf.Sin(y * 22f + seed)), 6f) * (x / 0.44f) : 0f;
+            float edge = (blot ? 0.72f + 0.3f * n : 0.74f + 0.26f * n) + 0.12f * (fine - 0.5f) + fingers;
+            Color baseColour;
+            switch (cell)
+            {
+                case 2: baseColour = BloodPalette.ArterialFilm; break;
+                case 3: baseColour = BloodPalette.PulmonaryFilm; break;
+                default: baseColour = BloodPalette.VenousFilm; break;
+            }
+            if (e > edge)
+            {
+                // Arterial: fine spatter around the run.
+                if (cell == 2 && r < 0.47f && fine > 0.8f && n > 0.45f) return new Color(baseColour.r, baseColour.g, baseColour.b, 0.9f);
+                return Clear;
+            }
+            float soft = Mathf.Clamp01((edge - e) / 0.18f);
+            float wet = Mathf.Clamp01(1f - e / edge);
+            // Thicker in the middle of the run: darker.
+            var c = Color.Lerp(baseColour, baseColour * 0.62f + BloodPalette.SoakWet * 0.38f, wet);
+            if (cell == 3)
+            {
+                // Froth: bubbles of a few sizes, denser where it leaves the wound (-U).
+                // Clumps of foam near where it leaves the wound (-U), a few stray bubbles further down the run.
+                float density = Mathf.Lerp(0.5f, 0.12f, Mathf.Clamp01(x + 0.5f));
+                float bubbles = Bubbles(x, y, seed);
+                if (bubbles > 0f && Noise(x * 5f + 3f, y * 5f) < density)
+                {
+                    c = Color.Lerp(c, BloodPalette.Froth, bubbles * 0.65f);
+                }
+            }
+            c.a = Mathf.Clamp01(soft * (0.7f + 0.3f * n) * 0.95f);
+            return c;
+        }
+
+        /// <summary>0..1 bubble highlight: a jittered grid of round bubbles, bright rim, darker middle.</summary>
+        private static float Bubbles(float x, float y, float seed)
+        {
+            float best = 0f;
+            for (int layer = 0; layer < 2; layer++)
+            {
+                float scale = layer == 0 ? 42f : 70f;
+                float gx = x * scale + seed, gy = y * scale - seed;
+                int ix = Mathf.FloorToInt(gx), iy = Mathf.FloorToInt(gy);
+                for (int dy = -1; dy <= 1; dy++)
+                {
+                    for (int dx = -1; dx <= 1; dx++)
+                    {
+                        int cx = ix + dx, cy = iy + dy;
+                        float h = Hash(cx, cy, layer);
+                        if (h < 0.68f) continue;
+                        float px = cx + 0.5f + 0.35f * (Hash(cy, cx, layer + 7) - 0.5f), py = cy + 0.5f + 0.35f * (Hash(cx + 3, cy - 5, layer) - 0.5f);
+                        float rad = 0.22f + 0.22f * h;
+                        float d = Mathf.Sqrt((gx - px) * (gx - px) + (gy - py) * (gy - py)) / rad;
+                        if (d > 1f) continue;
+                        // Rim brighter than the middle (a thin film catching light).
+                        best = Mathf.Max(best, d > 0.65f ? 0.9f : 0.45f);
+                    }
+                }
+            }
+            return best;
+        }
+
+        private static float Hash(int x, int y, int salt)
+        {
+            unchecked
+            {
+                uint h = (uint)(x * 374761393 + y * 668265263 + salt * 1274126177);
+                h = (h ^ (h >> 13)) * 1274126177u;
+                return ((h ^ (h >> 16)) & 0xFFFFFF) / 16777215f;
+            }
+        }
+
+        // ---- Helpers ------------------------------------------------------------------------------
+
+        private static readonly Color Clear = new Color(0f, 0f, 0f, 0f);
+
+        /// <summary>Distance from (x, y) to the segment a-b, minus <paramref name="radius"/>.</summary>
+        private static float Capsule(float x, float y, float ax, float ay, float bx, float by, float radius)
+        {
+            float px = x - ax, py = y - ay, dx = bx - ax, dy = by - ay;
+            float t = Mathf.Clamp01((px * dx + py * dy) / Mathf.Max(dx * dx + dy * dy, 1e-6f));
+            float qx = px - dx * t, qy = py - dy * t;
+            return Mathf.Sqrt(qx * qx + qy * qy) - radius;
+        }
+
+        /// <summary>A 2x2 atlas: shade(cell, x, y, r, angle) per pixel, cell coords -0.5..0.5; nothing past r 0.48 (mips stay in their cell).</summary>
+        private static Texture2D Atlas(System.Func<int, float, float, float, float, Color> shade)
+        {
+            const int size = Cell * 2;
+            var tex = new Texture2D(size, size, TextureFormat.RGBA32, true) { wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Trilinear, hideFlags = HideFlags.HideAndDontSave };
+            var pixels = new Color[size * size];
+            for (int cell = 0; cell < 4; cell++)
+            {
+                int ox = (cell & 1) * Cell, oy = (cell >> 1) * Cell;
+                for (int j = 0; j < Cell; j++)
+                {
+                    for (int i = 0; i < Cell; i++)
+                    {
+                        float x = (i + 0.5f) / Cell - 0.5f, y = (j + 0.5f) / Cell - 0.5f;
+                        float r = Mathf.Sqrt(x * x + y * y);
+                        pixels[(oy + j) * size + ox + i] = r > 0.48f ? Clear : shade(cell, x, y, r, Mathf.Atan2(y, x));
+                    }
                 }
             }
             tex.SetPixels(pixels);
@@ -1576,8 +2485,8 @@ namespace RealTargets.Gore
             return tex;
         }
 
-        /// <summary>Cheap value noise 0..1 (smooth enough at 128 px).</summary>
-        private static float Noise(float x, float y, System.Random rng)
+        /// <summary>Cheap smooth noise 0..1.</summary>
+        private static float Noise(float x, float y)
         {
             float v = Mathf.PerlinNoise(x + 37.1f, y + 11.7f) * 0.7f + Mathf.PerlinNoise(x * 3.1f + 5f, y * 3.1f + 2f) * 0.3f;
             return Mathf.Clamp01(v);

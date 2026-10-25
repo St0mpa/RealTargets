@@ -6,7 +6,7 @@
     <AssemblyName>RealTargets</AssemblyName>
     <RootNamespace>RealTargets</RootNamespace>
     <!-- Keep in sync with PluginInfo.Version. -->
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
@@ -70,6 +70,11 @@
     <Reference Include="DrakiaXYZ-BigBrain" HintPath="$(BepInExDir)\plugins\DrakiaXYZ-BigBrain.dll" Private="false" />
   </ItemGroup>
 
+  <!-- 1.2.0 localization: English built into the DLL (Localization/Loc.cs); the zip ships the same file as the translators' template. -->
+  <ItemGroup>
+    <EmbeddedResource Include="locales\en.json" LogicalName="RealTargets.Localization.en.json" />
+  </ItemGroup>
+
   <!-- Test kit ships next to the DLL. -->
   <ItemGroup Condition="'$(Public)' != 'true'">
     <None Update="Lab\testkit.json" CopyToOutputDirectory="PreserveNewest" Link="testkit.json" />
@@ -107,6 +112,8 @@
     <RemoveDir Directories="$(PackageStage)" />
     <MakeDir Directories="$(PackagePluginDir);$(DistDir)" />
     <Copy SourceFiles="$(TargetPath);$(RepoRoot)\LICENSE;$(RtReadme)" DestinationFolder="$(PackagePluginDir)" />
+    <!-- 1.2.0: the translators' template (English is also built in); a translation is another <code>.json there. -->
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\locales\en.json" DestinationFolder="$(PackagePluginDir)\locales" />
     <Delete Files="$(PackageZip)" />
     <ZipDirectory SourceDirectory="$(PackageStage)" DestinationFile="$(PackageZip)" />
     <Message Importance="high" Text="RealTargets package -> $(PackageZip)" />

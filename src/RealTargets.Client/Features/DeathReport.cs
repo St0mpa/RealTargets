@@ -8,6 +8,7 @@ using EFT.UI.SessionEnd;
 using HarmonyLib;
 using RealTargets.Autopsy;
 using RealTargets.Compat;
+using RealTargets.Localization;
 using SPT.Reflection.Patching;
 using TMPro;
 using UnityEngine;
@@ -285,7 +286,7 @@ namespace RealTargets.Features
                 {
                     if (!traumaCore) name.Set(_profile);
                     else if (_side == ESideType.Pmc && name._name != null && _profile.Info != null)
-                        name._name.text = $"{_profile.GetCorrectedNickname()} (Lv. {_profile.Info.Level})";
+                        name._name.text = $"{_profile.GetCorrectedNickname()} ({Loc.F("death.level_short", ("level", _profile.Info.Level))})";
                 }
             }
             var label = _screen._bodyPartLabel;
@@ -513,7 +514,7 @@ namespace RealTargets.Features
             if (_buttonText == null) return;
             var key = Plugin.DeathScreenAutopsyKey.Value;
             string hint = key.MainKey == KeyCode.None ? "" : $"  <size=11>[{key}]</size>";
-            _buttonText.text = (_showing ? "<b>BACK TO PMC</b>" : "<b>AUTOPSY</b>") + hint;
+            _buttonText.text = $"<b>{Loc.T(_showing ? "death.back_to_pmc" : "autopsy.tab")}</b>" + hint;
         }
 
         /// <summary>Left-drag turns the model about its vertical axis (EFT's own model screens do the same).</summary>

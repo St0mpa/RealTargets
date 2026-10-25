@@ -9,6 +9,7 @@ using EFT.InventoryLogic;
 using EFT.UI.DragAndDrop;
 using HarmonyLib;
 using RealTargets.Hits;
+using RealTargets.Localization;
 using SPT.Reflection.Patching;
 using TMPro;
 using UnityEngine;
@@ -279,7 +280,7 @@ namespace RealTargets.Autopsy
             Style(_toggleText, Mathf.Max(_header.fontSize, 13f));
             _toggleText.enableWordWrapping = false;
             _toggleText.alignment = TextAlignmentOptions.Center;
-            _toggleText.text = "<b>AUTOPSY</b>";
+            _toggleText.text = $"<b>{Loc.T("autopsy.tab")}</b>";
 
             // While the report is open, a clear hit area over EFT's LOOT tab takes you back to the loot.
             _lootHit = new GameObject("RealTargets.LootTab", typeof(RectTransform));
@@ -538,8 +539,7 @@ namespace RealTargets.Autopsy
 
             if (_record == null)
             {
-                Text(_content, $"<size=17><b>No recorded wounds</b></size>\n<color={Grey}>RealTargets saw no projectile hit this body this raid " +
-                               "(it died before the mod was watching, or from something that isn't a projectile).</color>", 13f);
+                Text(_content, $"<size=17><b>{Loc.T("autopsy.none.title")}</b></size>\n<color={Grey}>{Loc.T("autopsy.none.text")}</color>", 13f);
                 return;
             }
 
@@ -561,14 +561,14 @@ namespace RealTargets.Autopsy
             string gore = GoreSummary(_record, onlyMine);
             if (gore != null) Text(_content, gore, 12.5f);
 
-            var heading = new StringBuilder("<b>SHOTS</b>");
-            heading.Append($"  <color={Grey}>{_visible.Count} (oldest first)</color>");
-            if (hidden > 0) heading.Append($"  <color={Dim}>{hidden} by others hidden (Only my shots)</color>");
-            if (_record.Dropped > 0) heading.Append($"  <color={Dim}>{_record.Dropped} more not kept</color>");
+            var heading = new StringBuilder($"<b>{Loc.T("autopsy.shots.heading")}</b>");
+            heading.Append($"  <color={Grey}>{Loc.F("autopsy.shots.count", ("n", _visible.Count))}</color>");
+            if (hidden > 0) heading.Append($"  <color={Dim}>{Loc.F("autopsy.shots.hidden", ("n", hidden))}</color>");
+            if (_record.Dropped > 0) heading.Append($"  <color={Dim}>{Loc.F("autopsy.shots.dropped", ("n", _record.Dropped))}</color>");
             Text(_content, heading.ToString(), 13f);
 
             foreach (var shot in _visible) BuildRow(shot);
-            if (_visible.Count == 0) Text(_content, $"<color={Grey}>None.</color>", 12.5f);
+            if (_visible.Count == 0) Text(_content, $"<color={Grey}>{Loc.T("autopsy.shots.none")}</color>", 12.5f);
 
             // A rebuild (new hit on this body, Only my shots) keeps the clicked shot if it is still listed.
             if (_focused != 0 && !_visible.Exists(s => s.Number == _focused)) _focused = 0;
@@ -623,8 +623,8 @@ namespace RealTargets.Autopsy
                 _diagramImage.raycastTarget = false;
                 element.minWidth = element.preferredWidth = AutopsyDiagram.Width;
                 element.minHeight = element.preferredHeight = AutopsyDiagram.Height;
-                Label(imageGo.transform, "FRONT", new Vector2(AutopsyDiagram.ViewCentreX(false), 9f), 11f, Grey);
-                Label(imageGo.transform, "BACK", new Vector2(AutopsyDiagram.ViewCentreX(true), 9f), 11f, Grey);
+                Label(imageGo.transform, Loc.T("autopsy.chart.front"), new Vector2(AutopsyDiagram.ViewCentreX(false), 9f), 11f, Grey);
+                Label(imageGo.transform, Loc.T("autopsy.chart.back"), new Vector2(AutopsyDiagram.ViewCentreX(true), 9f), 11f, Grey);
                 foreach (var shot in _visible)
                 {
                     var first = shot.Projectiles.Find(p => p.Entry.Valid);
@@ -844,27 +844,30 @@ namespace RealTargets.Autopsy
         // ---------- report text ----------
 
         private static string Shooter(HitEvent hit) =>
-            hit.ShooterIsYou ? "<color=#ffc440><b>YOU</b></color>"
-            : string.IsNullOrEmpty(hit.ShooterName) ? $"<color={Grey}>unknown</color>"
+            hit.ShooterIsYou ? $"<color=#ffc440><b>{Loc.T("autopsy.you")}</b></color>"
+            : string.IsNullOrEmpty(hit.ShooterName) ? $"<color={Grey}>{Loc.T("autopsy.unknown")}</color>"
             : $"<color=#8cbeff>{hit.ShooterName}</color> <color={Dim}>({AutopsyText.Role(hit.ShooterSide, hit.ShooterRole)})</color>";
+
+        /// <summary>A body part in the middle of a sentence ("to the thorax").</summary>
+        private static string PartLower(EBodyPart part) => AutopsyText.Part(part).ToLowerInvariant();
 
         private static string Summary(BodyRecord r)
         {
             var sb = new StringBuilder(400);
-            sb.Append($"<size=19><b>{r.Name}</b></size>   <color={Grey}>{r.Role}{(r.Level > 0 ? $" · level {r.Level}" : "")}</color>\n");
+            sb.Append($"<size=19><b>{r.Name}</b></size>   <color={Grey}>{r.Role}{(r.Level > 0 ? " · " + Loc.F("autopsy.level", ("level", r.Level)) : "")}</color>\n");
             if (!r.Dead)
             {
-                sb.Append($"<color={Grey}>No death recorded.</color>");
+                sb.Append($"<color={Grey}>{Loc.T("autopsy.no_death")}</color>");
                 return sb.ToString();
             }
 
             var kill = r.KillingShot;
-            if (r.KillerIsYou) sb.Append($"<b><color={Red}>KILLED BY YOU</color></b>");
-            else if (!string.IsNullOrEmpty(r.KillerName)) sb.Append($"<b><color={Red}>KILLED BY</color></b> <color=#8cbeff>{r.KillerName}</color> <color={Dim}>({r.KillerRole})</color>");
-            else sb.Append($"<b><color={Red}>DIED</color></b>");
+            if (r.KillerIsYou) sb.Append($"<b><color={Red}>{Loc.T("autopsy.killed_by_you")}</color></b>");
+            else if (!string.IsNullOrEmpty(r.KillerName)) sb.Append($"<b><color={Red}>{Loc.T("autopsy.killed_by")}</color></b> <color=#8cbeff>{r.KillerName}</color> <color={Dim}>({r.KillerRole})</color>");
+            else sb.Append($"<b><color={Red}>{Loc.T("autopsy.died")}</color></b>");
             sb.Append($"   <color={Grey}>{r.DiedAt:HH:mm:ss} ({AutopsyText.Ago(DateTime.Now - r.DiedAt)})</color>\n");
 
-            sb.Append($"<color={Grey}>Cause of death:</color> ");
+            sb.Append($"<color={Grey}>{Loc.T("autopsy.cause")}</color> ");
             // The projectile that killed (or its later-frame hit, still inside), and the collider whose damage did it:
             // EFT's lethal segment, not the entry (1.1.0-legs: a forearm -> chest kill read "to the right arm").
             var killer = kill?.Projectiles.Find(p => p.Hit.Status == HitStatus.Killed || p.Continued.Exists(c => c.Status == HitStatus.Killed));
@@ -876,41 +879,41 @@ namespace RealTargets.Autopsy
                 // 1 HP): the shot is the cause, EFT's damage type the last straw.
                 var hit = kill.First;
                 var seg = CreditedSegment(hit, r.LethalPart);
-                sb.Append($"{Ammo(hit)} to the {AutopsyText.Part(seg.BodyPart).ToLowerInvariant()} ({AutopsyText.Collider(seg.Collider)})");
+                sb.Append(Loc.F("autopsy.cause.shot", ("ammo", Ammo(hit)), ("part", PartLower(seg.BodyPart)), ("place", AutopsyText.Collider(seg.Collider))));
                 if (seg.BodyPart != hit.Entry.BodyPart && !hit.Entry.HasPlate)
                 {
-                    sb.Append($" <color={Grey}>through the {AutopsyText.Collider(hit.Entry.Collider)}</color>");
+                    sb.Append($" <color={Grey}>{Loc.F("autopsy.cause.through", ("place", AutopsyText.Collider(hit.Entry.Collider)))}</color>");
                 }
-                sb.Append($", {hit.Distance:F0} m (shot #{kill.Number}) <color={Grey}>· died {kill.CreditDelay:F1} s later, " +
-                          $"{AutopsyText.DeathType(r.DeathType)}</color>");
+                sb.Append(", ").Append(Loc.F("autopsy.cause.distance", ("m", hit.Distance.ToString("F0")), ("shot", kill.Number)));
+                sb.Append($" <color={Grey}>· {Loc.F("autopsy.cause.died_later", ("s", kill.CreditDelay.ToString("F1")), ("how", AutopsyText.DeathType(r.DeathType)))}</color>");
                 return sb.ToString();
             }
             if (lethal != null && lethal.IsBlast && !bled)
             {
-                sb.Append($"blast of a {lethal.WeaponName} at {lethal.Distance:F1} m");
+                sb.Append(Loc.F("autopsy.cause.blast", ("weapon", lethal.WeaponName), ("m", lethal.Distance.ToString("F1"))));
                 if (lethal.BlastKpa > 1f) sb.Append($" (~{lethal.BlastKpa:F0} kPa)");
-                if (r.LethalPart != EBodyPart.Common) sb.Append($", {AutopsyText.Part(r.LethalPart).ToLowerInvariant()}");
-                sb.Append($" (shot #{kill.Number})");
+                if (r.LethalPart != EBodyPart.Common) sb.Append($", {PartLower(r.LethalPart)}");
+                sb.Append(" (").Append(Loc.F("autopsy.shot_ref", ("shot", kill.Number))).Append(')');
             }
             else if (lethal != null && !bled)
             {
                 var seg = lethal.Lethal;
-                sb.Append($"{Ammo(lethal)} to the {AutopsyText.Part(seg.BodyPart).ToLowerInvariant()} ({AutopsyText.Collider(seg.Collider)})");
+                sb.Append(Loc.F("autopsy.cause.shot", ("ammo", Ammo(lethal)), ("part", PartLower(seg.BodyPart)), ("place", AutopsyText.Collider(seg.Collider))));
                 if (seg.BodyPart != lethal.Entry.BodyPart && !lethal.Entry.HasPlate)
                 {
-                    sb.Append($" <color={Grey}>through the {AutopsyText.Collider(lethal.Entry.Collider)}</color>");
+                    sb.Append($" <color={Grey}>{Loc.F("autopsy.cause.through", ("place", AutopsyText.Collider(lethal.Entry.Collider)))}</color>");
                 }
-                sb.Append($", {killer.Hit.Distance:F0} m (shot #{kill.Number})");
+                sb.Append(", ").Append(Loc.F("autopsy.cause.distance", ("m", killer.Hit.Distance.ToString("F0")), ("shot", kill.Number)));
                 string spread = SpreadTo(r, lethal, seg);
                 if (spread != null)
                 {
-                    sb.Append($" <color={Grey}>· the destroyed {AutopsyText.Part(seg.BodyPart).ToLowerInvariant()}'s damage spread to the {spread}</color>");
+                    sb.Append($" <color={Grey}>· {Loc.F("autopsy.cause.spread", ("part", PartLower(seg.BodyPart)), ("to", spread))}</color>");
                 }
             }
             else
             {
                 sb.Append(AutopsyText.DeathType(r.DeathType));
-                if (!bled && r.LethalPart != EBodyPart.Common) sb.Append($", {AutopsyText.Part(r.LethalPart).ToLowerInvariant()}");
+                if (!bled && r.LethalPart != EBodyPart.Common) sb.Append($", {PartLower(r.LethalPart)}");
             }
             return sb.ToString();
         }
@@ -951,10 +954,10 @@ namespace RealTargets.Autopsy
         private static string Vitals(BodyRecord r, bool model, string organs)
         {
             var sb = new StringBuilder(300);
-            sb.Append("<b>AT DEATH</b>\n");
+            sb.Append($"<b>{Loc.T("autopsy.at_death")}</b>\n");
             if (r.HealthAtDeath.Count == 0)
             {
-                sb.Append($"<color={Grey}>not recorded</color>");
+                sb.Append($"<color={Grey}>{Loc.T("autopsy.not_recorded")}</color>");
                 return sb.ToString();
             }
             foreach (var part in AutopsyRecords.Parts)
@@ -962,7 +965,7 @@ namespace RealTargets.Autopsy
                 if (!r.HealthAtDeath.TryGetValue(part, out var hp)) continue;
                 string colour = hp.destroyed ? Red : hp.current < hp.maximum - 0.5f ? Orange : Grey;
                 sb.Append($"{AutopsyText.Part(part)}  <color={colour}>{Mathf.Ceil(hp.current):F0}/{hp.maximum:F0}</color>");
-                if (hp.destroyed) sb.Append($" <color={Red}>destroyed</color>");
+                if (hp.destroyed) sb.Append($" <color={Red}>{Loc.T("autopsy.destroyed")}</color>");
                 if (r.EffectsAtDeath.TryGetValue(part, out var effects) && effects.Count > 0)
                 {
                     sb.Append($" <color={Dim}>· {string.Join(", ", effects)}</color>");
@@ -971,16 +974,9 @@ namespace RealTargets.Autopsy
             }
             if (model && !string.IsNullOrEmpty(organs))
             {
-                sb.Append($"\n<b>ON THE PATH</b>\n<color={Orange}>{organs}</color>\n");
+                sb.Append($"\n<b>{Loc.T("autopsy.on_the_path")}</b>\n<color={Orange}>{organs}</color>\n");
             }
-            sb.Append(model
-                ? $"\n<size=11><color={Dim}>Pose at the moment of death. Ball = entry, clear ball = exit, small ball = stopped by armour, " +
-                  "red = fatal; yellow = your shots, blue = others. Bones (orange = fractured); organ zones (approximate) " +
-                  "light up where a shot went through. Glowing spindle = temporary cavity: the tissue the round's " +
-                  "energy stretched, widest where it dumped the most. Drag to turn, right-drag to move up/down, wheel to " +
-                  "zoom, double-click to reset; hover a shot to trace it, click it to look at it and see the details.</color></size>"
-                : $"\n<size=11><color={Dim}>dot = entry, ring = exit, small ring = stopped by armour, red ring = fatal; " +
-                  "yellow = your shots, blue = others. Hover a shot to trace it, click it for the details.</color></size>");
+            sb.Append($"\n<size=11><color={Dim}>{Loc.T(model ? "autopsy.legend.3d" : "autopsy.legend.2d")}</color></size>");
             return sb.ToString();
         }
 
@@ -1012,17 +1008,17 @@ namespace RealTargets.Autopsy
             }
             if (order.Count == 0) return null;
 
-            var sb = new StringBuilder("<b>ARMOUR</b>\n");
+            var sb = new StringBuilder($"<b>{Loc.T("autopsy.armour.heading")}</b>\n");
             foreach (var id in order)
             {
                 var e = pieces[id];
-                sb.Append($"<color={ArmourBlue}>{e.name}</color> <color={Grey}>(class {e.cls})</color>: {e.hits} hit{(e.hits == 1 ? "" : "s")}");
+                sb.Append($"<color={ArmourBlue}>{e.name}</color> <color={Grey}>({Loc.F("autopsy.armour.class", ("class", e.cls))})</color>: {Loc.P("autopsy.armour.hits", e.hits)}");
                 var parts = new List<string>(3);
-                if (e.through > 0) parts.Add($"<color={Red}>{e.through} through</color>");
-                if (e.stopped > 0) parts.Add($"{e.stopped} stopped");
-                if (e.deflected > 0) parts.Add($"{e.deflected} ricochet{(e.deflected == 1 ? "" : "s")}");
+                if (e.through > 0) parts.Add($"<color={Red}>{Loc.P("autopsy.armour.through", e.through)}</color>");
+                if (e.stopped > 0) parts.Add(Loc.P("autopsy.armour.stopped", e.stopped));
+                if (e.deflected > 0) parts.Add(Loc.P("autopsy.armour.ricochets", e.deflected));
                 if (parts.Count > 0) sb.Append(": ").Append(string.Join(", ", parts));
-                if (e.max > 0f) sb.Append($" <color={Grey}>· durability {e.first:F0} -> {e.last:F0}/{e.max:F0}</color>");
+                if (e.max > 0f) sb.Append($" <color={Grey}>· {Loc.F("autopsy.armour.durability", ("from", e.first.ToString("F0")), ("to", e.last.ToString("F0")), ("max", e.max.ToString("F0")))}</color>");
                 sb.Append('\n');
             }
             return sb.ToString().TrimEnd('\n');
@@ -1031,12 +1027,12 @@ namespace RealTargets.Autopsy
         private static string GoreSummary(BodyRecord r, bool onlyMine)
         {
             if (r.Gore.Count == 0) return null;
-            var sb = new StringBuilder("<b>GORE</b>\n");
+            var sb = new StringBuilder($"<b>{Loc.T("autopsy.gore.heading")}</b>\n");
             foreach (var g in r.Gore)
             {
                 var shot = g.Shot > 0 ? r.Shots.Find(s => s.Number == g.Shot) : null;
                 if (onlyMine && shot != null && !shot.ByYou) continue;
-                sb.Append($"<color={Red}>{g.What}</color> <color={Grey}>({g.Why}{(g.Shot > 0 ? $", shot #{g.Shot}" : "")})</color>\n");
+                sb.Append($"<color={Red}>{g.What}</color> <color={Grey}>({g.Why}{(g.Shot > 0 ? ", " + Loc.F("autopsy.shot_ref", ("shot", g.Shot)) : "")})</color>\n");
             }
             return sb.ToString().TrimEnd('\n');
         }
@@ -1047,8 +1043,8 @@ namespace RealTargets.Autopsy
             var blast = shot.First;
             var sb = new StringBuilder(300);
             sb.Append($"<b>#{shot.Number}</b>  ");
-            if (shot.Killing) sb.Append($"<b><color={Red}>FATAL</color></b>  ");
-            sb.Append($"<b><color={Orange}>BLAST</color></b>  ").Append(Shooter(blast));
+            if (shot.Killing) sb.Append($"<b><color={Red}>{Loc.T("autopsy.fatal")}</color></b>  ");
+            sb.Append($"<b><color={Orange}>{Loc.T("autopsy.blast")}</color></b>  ").Append(Shooter(blast));
             sb.Append($" <color={Grey}>·</color> {blast.WeaponName} <color={Grey}>· {blast.Distance:F1} m</color>");
             if (blast.BlastKpa > 1f) sb.Append($" <color={Grey}>· ~{blast.BlastKpa:F0} kPa</color>");
             sb.Append('\n');
@@ -1057,9 +1053,9 @@ namespace RealTargets.Autopsy
             foreach (var s in blast.Segments)
             {
                 total += s.DamageOut;
-                parts.Add($"{AutopsyText.Part(s.BodyPart).ToLowerInvariant()} {s.DamageOut:F0}");
+                parts.Add($"{PartLower(s.BodyPart)} {s.DamageOut:F0}");
             }
-            sb.Append($"<color={Grey}>Blast wave</color>");
+            sb.Append($"<color={Grey}>{Loc.T("autopsy.blast_wave")}</color>");
             var from = shot.Projectiles[0].From;
             if (!string.IsNullOrEmpty(from)) sb.Append($" {from}");
             sb.Append($": {total:F0} HP <color={Grey}>({string.Join(", ", parts)})</color>");
@@ -1072,17 +1068,17 @@ namespace RealTargets.Autopsy
             var blast = shot.First;
             var sb = new StringBuilder(400);
             sb.Append($"<color={Dim}>────────────</color>\n");
-            sb.Append($"<color={Grey}>Time</color> {blast.WallTime:HH:mm:ss.f}");
+            sb.Append($"<color={Grey}>{Loc.T("autopsy.time")}</color> {blast.WallTime:HH:mm:ss.f}");
             if (_record.Dead)
             {
                 var toDeath = _record.DiedAt - blast.WallTime;
-                if (toDeath.TotalSeconds >= 0.05) sb.Append($" <color={Grey}>· {Seconds(toDeath)} before death</color>");
+                if (toDeath.TotalSeconds >= 0.05) sb.Append($" <color={Grey}>· {Loc.F("autopsy.before_death", ("time", Seconds(toDeath)))}</color>");
             }
             sb.Append('\n');
             if (blast.BlastCharge > 0f)
             {
-                sb.Append($"<color={Grey}>Charge</color> ~{blast.BlastCharge * 1000f:F0} g TNT <color={Grey}>· peak overpressure at the chest</color> " +
-                          $"~{blast.BlastKpa:F0} kPa <color={Grey}>(lung injury from ~100, eardrums from ~35)</color>\n");
+                sb.Append($"<color={Grey}>{Loc.T("autopsy.charge")}</color> {Loc.F("autopsy.charge.tnt", ("g", (blast.BlastCharge * 1000f).ToString("F0")))} " +
+                          $"<color={Grey}>· {Loc.T("autopsy.charge.peak")}</color> ~{blast.BlastKpa:F0} kPa <color={Grey}>({Loc.T("autopsy.charge.injury")})</color>\n");
             }
             var parts = new List<string>(7);
             foreach (var s in blast.Segments)
@@ -1090,9 +1086,9 @@ namespace RealTargets.Autopsy
                 if (!blast.HealthAfter.TryGetValue(s.BodyPart, out var hp)) continue;
                 parts.Add($"{AutopsyText.Part(s.BodyPart)} {Mathf.Ceil(hp.current + s.DamageOut):F0} -> {Mathf.Ceil(hp.current):F0}/{hp.maximum:F0}");
             }
-            if (parts.Count > 0) sb.Append($"<color={Grey}>Health</color> {string.Join(", ", parts)}\n");
-            sb.Append($"<color={Grey}>EFT's own blast damage (no wound channel); its fragments are listed as their own row.</color>");
-            sb.Append(shot.Killing ? $" <color={Red}>The blast killed.</color>" : "");
+            if (parts.Count > 0) sb.Append($"<color={Grey}>{Loc.T("autopsy.health")}</color> {string.Join(", ", parts)}\n");
+            sb.Append($"<color={Grey}>{Loc.T("autopsy.blast.note")}</color>");
+            sb.Append(shot.Killing ? $" <color={Red}>{Loc.T("autopsy.blast.killed")}</color>" : "");
             return sb.ToString();
         }
 
@@ -1106,7 +1102,7 @@ namespace RealTargets.Autopsy
 
             var sb = new StringBuilder(500);
             sb.Append($"<b>#{shot.Number}</b>  ");
-            if (shot.Killing) sb.Append($"<b><color={Red}>FATAL</color></b>  ");
+            if (shot.Killing) sb.Append($"<b><color={Red}>{Loc.T("autopsy.fatal")}</color></b>  ");
             sb.Append(Shooter(first));
             if (!string.IsNullOrEmpty(first.WeaponName) && first.WeaponName != "none") sb.Append($" <color={Grey}>·</color> {first.WeaponName}");
             string ammo = Ammo(first);
@@ -1115,7 +1111,7 @@ namespace RealTargets.Autopsy
             float energy = 0f;
             foreach (var p in shot.Projectiles) energy += p.Hit.ImpactEnergy;
             if (energy > 0.5f && !fragments) sb.Append($" <color={Grey}>· {energy:F0} J</color>");
-            if (shot.PostMortem) sb.Append($" <color={Dim}>· after death</color>");
+            if (shot.PostMortem) sb.Append($" <color={Dim}>· {Loc.T("autopsy.after_death")}</color>");
             sb.Append('\n');
 
             if (multi) AppendVolley(sb, shot, fragments);
@@ -1133,14 +1129,14 @@ namespace RealTargets.Autopsy
             sb.Append($"<color={Dim}>────────────</color>\n");
 
             // When.
-            sb.Append($"<color={Grey}>Time</color> {first.WallTime:HH:mm:ss.f}");
+            sb.Append($"<color={Grey}>{Loc.T("autopsy.time")}</color> {first.WallTime:HH:mm:ss.f}");
             var opening = _record.Shots.Count > 0 ? _record.Shots[0].First.WallTime : first.WallTime;
-            if (shot.Number > 1) sb.Append($" <color={Grey}>· {Seconds(first.WallTime - opening)} after the first hit</color>");
+            if (shot.Number > 1) sb.Append($" <color={Grey}>· {Loc.F("autopsy.after_first", ("time", Seconds(first.WallTime - opening)))}</color>");
             if (_record.Dead)
             {
                 var toDeath = _record.DiedAt - first.WallTime;
-                if (toDeath.TotalSeconds >= 0.05) sb.Append($" <color={Grey}>· {Seconds(toDeath)} before death</color>");
-                else if (toDeath.TotalSeconds <= -0.05) sb.Append($" <color={Grey}>· {Seconds(-toDeath)} after death</color>");
+                if (toDeath.TotalSeconds >= 0.05) sb.Append($" <color={Grey}>· {Loc.F("autopsy.before_death", ("time", Seconds(toDeath)))}</color>");
+                else if (toDeath.TotalSeconds <= -0.05) sb.Append($" <color={Grey}>· {Loc.F("autopsy.after_death_by", ("time", Seconds(-toDeath)))}</color>");
             }
             sb.Append('\n');
 
@@ -1153,18 +1149,18 @@ namespace RealTargets.Autopsy
             {
                 if (_model.ChannelOf(shot.Number, out var ch) && ch.Length > 0.005f)
                 {
-                    sb.Append($"<color={Grey}>Wound channel</color> {ch.Length * 100f:F0} cm");
-                    if (ch.Stretches > 1) sb.Append($" <color={Grey}>in {ch.Stretches} stretches (out of one part, into the next)</color>");
-                    sb.Append(ch.StayedIn ? $", <color={Orange}>round stayed in</color>" : ", through");
+                    sb.Append($"<color={Grey}>{Loc.T("autopsy.channel")}</color> {ch.Length * 100f:F0} cm");
+                    if (ch.Stretches > 1) sb.Append($" <color={Grey}>{Loc.F("autopsy.channel.stretches", ("n", ch.Stretches))}</color>");
+                    sb.Append(ch.StayedIn ? $", <color={Orange}>{Loc.T("autopsy.channel.stayed_in")}</color>" : ", " + Loc.T("autopsy.channel.through"));
                     if (ch.CavityRadius > 0f)
                     {
-                        sb.Append($" <color={Grey}>· temporary cavity up to</color> {ch.CavityRadius * 200f:F0} cm <color={Grey}>across, widest</color> " +
-                                  (ch.Expanding ? "near the entry (expanding)" : "deeper in (FMJ yaws)"));
+                        sb.Append($" <color={Grey}>· {Loc.F("autopsy.channel.cavity", ("cm", (ch.CavityRadius * 200f).ToString("F0")))}</color> " +
+                                  Loc.T(ch.Expanding ? "autopsy.channel.widest_entry" : "autopsy.channel.widest_deep"));
                     }
                     sb.Append('\n');
                 }
                 string organs = _model.OrgansOf(shot.Number);
-                if (organs.Length > 0) sb.Append($"<color={Grey}>Organs</color> <color={Orange}>{organs}</color>\n");
+                if (organs.Length > 0) sb.Append($"<color={Grey}>{Loc.T("autopsy.organs")}</color> <color={Orange}>{organs}</color>\n");
             }
 
             // Health of the part it hit, before (last recorded hit on that part, else full) and after.
@@ -1190,13 +1186,15 @@ namespace RealTargets.Autopsy
             {
                 sb.Append($"<color={Grey}>{AutopsyText.Part(part)}</color>");
             }
-            sb.Append(shot.Killing ? $" <color={Grey}>·</color> <color={Red}>this shot killed</color>"
-                : shot.PostMortem ? $" <color={Grey}>· hit the corpse</color>"
-                : $" <color={Grey}>· alive after it</color>");
+            sb.Append(shot.Killing ? $" <color={Grey}>·</color> <color={Red}>{Loc.T("autopsy.this_killed")}</color>"
+                : shot.PostMortem ? $" <color={Grey}>· {Loc.T("autopsy.hit_corpse")}</color>"
+                : $" <color={Grey}>· {Loc.T("autopsy.alive_after")}</color>");
             return sb.ToString();
         }
 
-        private static string Seconds(TimeSpan span) => span.TotalSeconds < 60 ? $"{span.TotalSeconds:F1} s" : $"{(int)span.TotalMinutes} min {span.Seconds} s";
+        private static string Seconds(TimeSpan span) => span.TotalSeconds < 60
+            ? Loc.F("time.seconds", ("s", span.TotalSeconds.ToString("F1")))
+            : Loc.F("time.minutes_seconds", ("min", (int)span.TotalMinutes), ("s", span.Seconds));
 
         private static EBodyPart MainPart(HitEvent hit)
         {
@@ -1207,31 +1205,31 @@ namespace RealTargets.Autopsy
         private static void AppendBallistics(StringBuilder sb, HitEvent hit)
         {
             var entry = hit.Entry;
-            sb.Append($"<color={Grey}>Round</color> {Ammo(hit)}");
+            sb.Append($"<color={Grey}>{Loc.T("autopsy.round")}</color> {Ammo(hit)}");
             var round = new List<string>(2);
             if (!string.IsNullOrEmpty(hit.Caliber)) round.Add(hit.Caliber);
             if (hit.BulletMassGram > 0f) round.Add($"{hit.BulletMassGram:0.##} g");
             if (round.Count > 0) sb.Append($" <color={Grey}>({string.Join(", ", round)})</color>");
             if (hit.ImpactSpeed > 0f)
             {
-                sb.Append($" <color={Grey}>·</color> {hit.ImpactSpeed:F0} m/s <color={Grey}>at impact</color>");
-                if (hit.MuzzleSpeed > hit.ImpactSpeed + 0.5f) sb.Append($" <color={Grey}>({hit.MuzzleSpeed:F0} at the muzzle)</color>");
+                sb.Append($" <color={Grey}>·</color> {hit.ImpactSpeed:F0} m/s <color={Grey}>{Loc.T("autopsy.at_impact")}</color>");
+                if (hit.MuzzleSpeed > hit.ImpactSpeed + 0.5f) sb.Append($" <color={Grey}>({Loc.F("autopsy.at_muzzle", ("speed", hit.MuzzleSpeed.ToString("F0")))})</color>");
             }
             if (hit.ImpactEnergy > 0.5f) sb.Append($" <color={Grey}>·</color> {hit.ImpactEnergy:F0} J");
             sb.Append('\n');
 
-            if (entry.PenetrationIn > 0f) sb.Append($"<color={Grey}>Penetration power</color> {entry.PenetrationIn:F0}");
+            if (entry.PenetrationIn > 0f) sb.Append($"<color={Grey}>{Loc.T("autopsy.penetration")}</color> {entry.PenetrationIn:F0}");
             bool armour = false;
             foreach (var s in hit.Segments)
             {
                 if (!s.Armour.Any) continue;
                 armour = true;
-                sb.Append($" <color={Grey}>·</color> <color={ArmourBlue}>{s.Armour.Name}</color> <color={Grey}>class {s.Armour.Class} met pen</color> {s.PenetrationIn:F0}");
+                sb.Append($" <color={Grey}>·</color> <color={ArmourBlue}>{s.Armour.Name}</color> <color={Grey}>{Loc.F("autopsy.armour.met", ("class", s.Armour.Class))}</color> {s.PenetrationIn:F0}");
             }
             if (entry.PenetrationIn > 0f || armour) sb.Append('\n');
             if (armour && hit.ImpactEnergy > 0.5f && hit.FleshFraction < 0.995f)
             {
-                sb.Append($"<color={Grey}>Past the armour</color> {hit.EffectiveEnergy:F0} J <color={Grey}>({hit.FleshFraction * 100f:F0} % of the damage)</color>\n");
+                sb.Append($"<color={Grey}>{Loc.T("autopsy.past_armour")}</color> {hit.EffectiveEnergy:F0} J <color={Grey}>({Loc.F("autopsy.past_armour.share", ("pct", (hit.FleshFraction * 100f).ToString("F0")))})</color>\n");
             }
 
             // Damage collider by collider (plates are their own segment and do no damage).
@@ -1241,7 +1239,7 @@ namespace RealTargets.Autopsy
                 if (s.HasPlate) continue;
                 parts.Add($"{AutopsyText.Collider(s.Collider)} {s.DamageIn:F0} -> {s.DamageOut:F0}");
             }
-            if (parts.Count > 1) sb.Append($"<color={Grey}>Damage by place</color> {string.Join(", ", parts)}\n");
+            if (parts.Count > 1) sb.Append($"<color={Grey}>{Loc.T("autopsy.damage_by_place")}</color> {string.Join(", ", parts)}\n");
         }
 
         private static void AppendProjectiles(StringBuilder sb, AutopsyShot shot)
@@ -1249,31 +1247,31 @@ namespace RealTargets.Autopsy
             const int MaxLines = 12;
             var first = shot.First;
             bool fragments = first.IsFragment || first.DamageType == EDamageType.GrenadeFragment;
-            sb.Append($"<color={Grey}>Round</color> {Ammo(first)}");
-            if (!fragments && first.ImpactSpeed > 0f) sb.Append($" <color={Grey}>·</color> {first.ImpactSpeed:F0} m/s <color={Grey}>at impact</color>");
+            sb.Append($"<color={Grey}>{Loc.T("autopsy.round")}</color> {Ammo(first)}");
+            if (!fragments && first.ImpactSpeed > 0f) sb.Append($" <color={Grey}>·</color> {first.ImpactSpeed:F0} m/s <color={Grey}>{Loc.T("autopsy.at_impact")}</color>");
             sb.Append('\n');
             int n = 0;
             foreach (var p in shot.Projectiles)
             {
                 if (n == MaxLines)
                 {
-                    sb.Append($"<color={Dim}>+{shot.Projectiles.Count - MaxLines} more</color>\n");
+                    sb.Append($"<color={Dim}>{Loc.F("autopsy.more", ("n", shot.Projectiles.Count - MaxLines))}</color>\n");
                     break;
                 }
                 n++;
                 var hit = p.Hit;
                 var flesh = hit.Segments.Exists(s => !s.HasPlate) ? hit.Segments.Find(s => !s.HasPlate) : hit.Entry;
-                sb.Append($"<color={Grey}>{(fragments ? "fragment" : "pellet")} {n}</color> {AutopsyText.Collider(flesh.Collider)}");
+                sb.Append($"<color={Grey}>{Loc.F(fragments ? "autopsy.fragment_n" : "autopsy.pellet_n", ("n", n))}</color> {AutopsyText.Collider(flesh.Collider)}");
                 if (hit.ImpactEnergy > 0.5f) sb.Append($" <color={Grey}>· {hit.ImpactEnergy:F0} J</color>");
                 float body = 0f;
                 foreach (var s in hit.Segments)
                 {
                     if (!s.HasPlate) body += s.DamageOut;
                 }
-                sb.Append($" <color={Grey}>· damage</color> {body:F0}");
-                sb.Append(AutopsyDiagram.StoppedByArmour(hit) ? $" <color={ArmourBlue}>· stopped by armour</color>"
-                    : hit.Exits.Exists(e => !e.plate) ? " <color=" + Grey + ">· through</color>"
-                    : $" <color={Orange}>· stayed in</color>");
+                sb.Append($" <color={Grey}>· {Loc.T("autopsy.damage_lower")}</color> {body:F0}");
+                sb.Append(AutopsyDiagram.StoppedByArmour(hit) ? $" <color={ArmourBlue}>· {Loc.T("autopsy.stopped_by_armour")}</color>"
+                    : hit.Exits.Exists(e => !e.plate) ? $" <color={Grey}>· {Loc.T("autopsy.channel.through")}</color>"
+                    : $" <color={Orange}>· {Loc.T("autopsy.stayed_in")}</color>");
                 sb.Append('\n');
             }
         }
@@ -1293,13 +1291,13 @@ namespace RealTargets.Autopsy
                 if (!s.Armour.Any) continue;
                 string result = s.Armour.Outcome switch
                 {
-                    ArmourOutcome.Penetrated => $"<color={Red}>penetrated</color>",
-                    ArmourOutcome.Stopped => "<b>stopped</b>",
-                    ArmourOutcome.Deflected => "<b>ricochet</b>",
+                    ArmourOutcome.Penetrated => $"<color={Red}>{Loc.T("autopsy.armour.penetrated")}</color>",
+                    ArmourOutcome.Stopped => $"<b>{Loc.T("autopsy.armour.stopped_one")}</b>",
+                    ArmourOutcome.Deflected => $"<b>{Loc.T("autopsy.armour.ricochet")}</b>",
                     _ => "",
                 };
-                sb.Append($"<color={ArmourBlue}>{s.Armour.Name}</color> <color={Grey}>(class {s.Armour.Class})</color>: {result}");
-                if (s.Armour.DurabilityMax > 0f) sb.Append($" <color={Grey}>· durability {s.Armour.DurabilityBefore:F0} -> {s.Armour.DurabilityAfter:F0}</color>");
+                sb.Append($"<color={ArmourBlue}>{s.Armour.Name}</color> <color={Grey}>({Loc.F("autopsy.armour.class", ("class", s.Armour.Class))})</color>: {result}");
+                if (s.Armour.DurabilityMax > 0f) sb.Append($" <color={Grey}>· {Loc.F("autopsy.armour.durability_change", ("from", s.Armour.DurabilityBefore.ToString("F0")), ("to", s.Armour.DurabilityAfter.ToString("F0")))}</color>");
                 sb.Append('\n');
             }
 
@@ -1316,23 +1314,23 @@ namespace RealTargets.Autopsy
                     if (!s.HasPlate) body += s.DamageOut;
                 }
             }
-            sb.Append($"<color={Grey}>Damage</color> {entry.DamageIn:F0} -> {body:F0} <color={Grey}>to the body</color>");
+            sb.Append($"<color={Grey}>{Loc.T("autopsy.damage")}</color> {entry.DamageIn:F0} -> {body:F0} <color={Grey}>{Loc.T("autopsy.to_body")}</color>");
             if (hit.HealthAfter.TryGetValue(part.BodyPart, out var hp) && hit.Status != HitStatus.Corpse)
             {
-                sb.Append($" <color={Grey}>· {AutopsyText.Part(part.BodyPart).ToLowerInvariant()} left at</color> {Mathf.Ceil(hp.current):F0}/{hp.maximum:F0}");
+                sb.Append($" <color={Grey}>· {Loc.F("autopsy.left_at", ("part", PartLower(part.BodyPart)))}</color> {Mathf.Ceil(hp.current):F0}/{hp.maximum:F0}");
             }
             sb.Append('\n');
 
-            sb.Append($"<color={Grey}>Path:</color> ");
+            sb.Append($"<color={Grey}>{Loc.T("autopsy.path")}</color> ");
             if (AutopsyDiagram.StoppedByArmour(hit))
             {
-                sb.Append("stopped by armour, no wound");
+                sb.Append(Loc.T("autopsy.path.stopped"));
                 return;
             }
             // Out of the flesh and into armour further on (a forearm, then the chest plate).
             var later = AutopsyDiagram.StoppedLater(hit);
             string stoppedLater = later.HasValue
-                ? $" -> <color={ArmourBlue}>{(later.Value.Armour.Outcome == ArmourOutcome.Deflected ? "ricochet off" : "stopped by")} {later.Value.Armour.Name}</color>"
+                ? $" -> <color={ArmourBlue}>{Loc.F(later.Value.Armour.Outcome == ArmourOutcome.Deflected ? "autopsy.path.ricochet_off" : "autopsy.path.stopped_by", ("armour", later.Value.Armour.Name))}</color>"
                 : "";
             if (p.Legs3D.Count > 0)
             {
@@ -1348,8 +1346,8 @@ namespace RealTargets.Autopsy
             }
             sb.Append(path.Count > 0 ? string.Join(" -> ", path) : AutopsyText.Collider(entry.Collider));
             var exit = hit.Exits.Find(e => !e.plate);
-            if (hit.Exits.Exists(e => !e.plate)) sb.Append($" -> <b>exit</b> {AutopsyText.Collider(exit.collider)}");
-            else if (!later.HasValue) sb.Append($" -> <color={Orange}>stayed in the body</color>");
+            if (hit.Exits.Exists(e => !e.plate)) sb.Append($" -> <b>{Loc.T("autopsy.path.exit")}</b> {AutopsyText.Collider(exit.collider)}");
+            else if (!later.HasValue) sb.Append($" -> <color={Orange}>{Loc.T("autopsy.path.stayed_in")}</color>");
             sb.Append(stoppedLater);
         }
 
@@ -1378,12 +1376,12 @@ namespace RealTargets.Autopsy
                 }
                 if (leg.Exited)
                 {
-                    tokens.Add($"<b>exit</b> {AutopsyText.Collider(leg.ExitCollider)}");
+                    tokens.Add($"<b>{Loc.T("autopsy.path.exit")}</b> {AutopsyText.Collider(leg.ExitCollider)}");
                     lastExit = tokens.Count - 1;
                 }
                 else
                 {
-                    tokens.Add($"<color={Orange}>stayed in the body</color>");
+                    tokens.Add($"<color={Orange}>{Loc.T("autopsy.path.stayed_in")}</color>");
                 }
             }
             return string.Join(" -> ", tokens);
@@ -1413,21 +1411,20 @@ namespace RealTargets.Autopsy
                 }
             }
 
-            string unit = fragments ? "fragment" : "pellet";
             int total = shot.Projectiles.Count;
-            sb.Append(fragments ? $"{total} {unit}{(total == 1 ? "" : "s")} hit"
-                : $"{total} of {Mathf.Max(first.ProjectileCount, total)} {unit}s hit");
+            sb.Append(fragments ? Loc.P("autopsy.volley.fragments", total)
+                : Loc.P("autopsy.volley.pellets", total, ("of", Mathf.Max(first.ProjectileCount, total))));
             if (byPart.Count > 0)
             {
                 sb.Append(": ").Append(string.Join(", ", byPart.OrderBy(kv => (int)kv.Key)
-                    .Select(kv => $"{kv.Value} {AutopsyText.Part(kv.Key).ToLowerInvariant()}")));
+                    .Select(kv => $"{kv.Value} {PartLower(kv.Key)}")));
             }
             var from = shot.Projectiles.Find(p => !string.IsNullOrEmpty(p.From))?.From;
             if (from != null) sb.Append($", {from}");
             sb.Append('\n');
-            if (stopped > 0) sb.Append($"<color={ArmourBlue}>{stopped} stopped by armour</color>  ");
-            if (through > 0) sb.Append($"{through} went through  ");
-            sb.Append($"<color={Grey}>Damage</color> {damageIn:F0} -> {body:F0} <color={Grey}>to the body</color>");
+            if (stopped > 0) sb.Append($"<color={ArmourBlue}>{Loc.P("autopsy.volley.stopped", stopped)}</color>  ");
+            if (through > 0) sb.Append($"{Loc.P("autopsy.volley.through", through)}  ");
+            sb.Append($"<color={Grey}>{Loc.T("autopsy.damage")}</color> {damageIn:F0} -> {body:F0} <color={Grey}>{Loc.T("autopsy.to_body")}</color>");
         }
 
 #if !PUBLIC
