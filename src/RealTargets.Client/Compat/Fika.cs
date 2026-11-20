@@ -25,6 +25,7 @@ namespace RealTargets.Compat
         internal static string Version { get; private set; }
 
         private static Type _fikaPlayer;
+        private static Type _observedPlayer;
         private static Func<Player, bool> _observedAI;
         private static Func<bool> _headless;
 
@@ -37,6 +38,7 @@ namespace RealTargets.Compat
             try
             {
                 _fikaPlayer = AccessTools.TypeByName(Players + "FikaPlayer");
+                _observedPlayer = AccessTools.TypeByName(Players + "ObservedPlayer");
                 var field = _fikaPlayer != null ? AccessTools.Field(_fikaPlayer, "IsObservedAI") : null;
                 if (field != null && field.FieldType == typeof(bool))
                 {
@@ -58,6 +60,7 @@ namespace RealTargets.Compat
             }
 
             Plugin.Log.LogInfo($"[Compat] Fika {Version}: bots by IsObservedAI {(_observedAI != null ? "ok" : "NOT FOUND")}, " +
+                               $"observed copies {(_observedPlayer != null ? "ok" : "NOT FOUND (no corpse pushes)")}, " +
                                $"headless check {(_headless != null ? "ok" : "NOT FOUND")}");
         }
 
@@ -70,6 +73,14 @@ namespace RealTargets.Compat
         /// <summary>A Fika player that Fika says is a bot (an ObservedPlayer copy of a bot on a client).</summary>
         internal static bool IsObservedAI(Player player) =>
             _observedAI != null && player != null && _fikaPlayer.IsInstanceOfType(player) && _observedAI(player);
+
+        /// <summary>
+        /// Someone else's copy (ObservedPlayer): on a client every bot and other human, on the host every client's human.
+        /// Fika installed but the type not found (renamed in an update): treated as a copy, so we never push what we
+        /// may not own.
+        /// </summary>
+        internal static bool IsObserved(Player player) =>
+            Installed && player != null && (_observedPlayer == null || _observedPlayer.IsInstanceOfType(player));
 
         /// <summary>
         /// Fika's ApplyShot overrides that apply a hit's damage and can be called without a body collider (rockets, flares,

@@ -297,7 +297,7 @@ namespace RealTargets.Features
             // Corpses in range are thrown.
             foreach (var player in Singleton<GameWorld>.Instance.AllPlayersEverExisted.ToList())
             {
-                if (player == null || player.ActiveHealthController == null || player.ActiveHealthController.IsAlive) continue;
+                if (player == null || Hits.Targets.IsAlive(player) || !Hits.Targets.OwnsBody(player)) continue;
                 var chest = Chest(player);
                 float d = Vector3.Distance(chest, at);
                 if (d > 6f) continue;

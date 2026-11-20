@@ -85,12 +85,14 @@ switched off on its own, and the thresholds can be tuned:
 - **12. Debug**: log hits, blood and wound placement to the BepInEx log (all off by default; turn on for a bug report).
 
 ## Translations
+Included: **Russian** (`ru`, by [Praxideke](https://github.com/Praxideke), from 1.2.1).
+
 The mod's own text (the AUTOPSY tab, the death screen, the F12 descriptions) is English, built in. To translate it,
 copy `BepInEx/plugins/RealTargets/locales/en.json` to `<code>.json` in the same folder, with the game's language code
 (`ru`, `ge`, `fr`, `es`, `pl`...), and translate the values. Keep the keys, the `{slots}` and the `<tags>`. Keys
 ending in `.one` / `.few` / `.many` / `.other` are plural forms (Russian and Polish use all of one, few and many).
 The mod then follows the game's language, or **01. General / Language** sets one. Anything missing shows in English.
-Translations are welcome on the Forge page.
+Translations are welcome on the Forge page or as a pull request on GitHub.
 
 ## Compatibility
 - **SPT 4.1.6** (tested; later 4.1.x patches should work). Client-only: no server mod.
@@ -108,9 +110,9 @@ Translations are welcome on the Forge page.
     hides TraumaCore's (**09. Death screen > Report** = TraumaCore or Both to change that). With HollywoodFX, turn
     TraumaCore's Procedural World Blood off (it draws red squares then, and RealTargets already draws the blood).
   - **SAIN**, BigBrain, UI Fixes, LootNet, AmandsSense, Dynamic Maps: no conflicts.
-- **Fika 2.4.6**: works for a Fika host and solo (tested); clients are expected to work but not tested yet. **Every
-  player in a Fika group needs the same RealTargets version.** Each machine draws its own blood; the mod stays off on a
-  headless host.
+- **Fika 2.4.6**: works for a Fika host, solo and, from 1.2.1, clients (a player tested it as a client with a headless
+  host). **Every player in a Fika group needs the same RealTargets version.** Each machine draws its own blood; the mod
+  stays off on a headless host, so it doesn't need to be installed there.
 - Tried it with another mod? Say so on the [Forge page](https://sp-mod.com/mod/3165/realtargets), works or not.
 - Performance: the mod's own CPU time averages about 0.1 ms per frame in a busy raid; drawing the blood of ten bleeding
   bodies costs about 0.15 ms (measured on Factory). Blood marks, pools and gore pieces have fixed caps, so a long raid

@@ -314,8 +314,11 @@ namespace RealTargets.Gore
 
                 try
                 {
+                    // Death from HealthController (1.2.1): ActiveHealthController is null on Fika's copies of bots, which
+                    // marked every living one dead on its first wound. It stays the source of EFT's bleed effects (null
+                    // on a copy: our own bleeding model alone).
                     var health = player.ActiveHealthController;
-                    if (!b.IsDead && (health == null || !health.IsAlive))
+                    if (!b.IsDead && !Hits.Targets.IsAlive(player))
                     {
                         b.PressureAtDeath = b.Pressure;
                         b.HeartRateAtDeath = b.HeartRate;

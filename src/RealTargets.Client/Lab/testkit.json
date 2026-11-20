@@ -1,7 +1,7 @@
 {
-  "_comment": "Test kit mailed to Stompa before every test (Messenger > Commando, via SPT's 'spt give'). Stompa loses the kit in each test raid, so every new kitId mails the whole kit; F4 in the menus resends it. Ghost/lab tests: lean (only what the test needs, presets with their magazine + one magazine of ammo). Normal raids without ghost (Stompa, 2026-10-16): a full META-style kit with plenty of magazines and ammo + the meds a raid needs. 'spt give' sends a template with a default preset as the whole preset (weapons with their magazine, armour with its plates); magazines and meds come one per count, ammo split into stacks. Template ids verified in the SPT 4.1.6 database (2026-10-19).",
-  "kitId": "1.2.0-loc-1",
-  "note": "1.2.0 live raid (ghost on): localization + F12 sections + perf-7 (testing.md \"1.2.0 live raid\"): M4A1 + one magazine, shoot bots, open their AUTOPSY, check the death screen if you die. Lean kit.",
+  "_comment": "Test kit mailed to Stompa before every test (Messenger > Commando, via SPT's 'spt give'). Stompa loses the kit in each test raid, so every new kitId mails the whole kit; F4 in the menus resends it. Ghost/lab tests: lean (only what the test needs, presets with their magazine + one magazine of ammo). Normal raids without ghost (Stompa, 2026-10-16): a full META-style kit with plenty of magazines and ammo + the meds a raid needs. 'spt give' sends a template with a default preset as the whole preset (weapons with their magazine, armour with its plates); magazines and meds come one per count, ammo split into stacks. Template ids verified in the SPT 4.1.6 database (2026-10-19; RGD-5 2026-11-01; MP-133, 7mm buckshot, Grizzly 40 2026-11-19).",
+  "kitId": "1.2.1-fikaclient-2",
+  "note": "1.2.1 Fika client tests (testing.md \"fika-client-2\"): M4A1 + one magazine to wound bots before killing them and to shoot corpses, 2 RGD-5 for the blast throw on a corpse (corpse fix); MP-133 with one tube of 7mm buckshot (head within 5 m) and one of Grizzly 40 slugs (head at range) for killing headshots as a client (remote late death). Lean kit.",
   "items": [
     {
       "name": "Colt M4A1 5.56x45 (default preset with its 30-round magazine)",
@@ -12,6 +12,26 @@
       "name": "5.56x45 M855A1 (one magazine)",
       "tpl": "54527ac44bdc2d36668b4567",
       "count": 30
+    },
+    {
+      "name": "RGD-5 hand grenade",
+      "tpl": "5448be9a4bdc2dfd2f8b456a",
+      "count": 2
+    },
+    {
+      "name": "MP-133 12ga (default preset, 6-round tube)",
+      "tpl": "54491c4f4bdc2db1078b4568",
+      "count": 1
+    },
+    {
+      "name": "12/70 7mm buckshot (one tube)",
+      "tpl": "560d5e524bdc2d25448b4571",
+      "count": 6
+    },
+    {
+      "name": "12/70 Grizzly 40 slug (one tube)",
+      "tpl": "5d6e6869a4b9361c140bcfde",
+      "count": 6
     },
     {
       "name": "6B47 Ratnik-BSh helmet (Olive Drab)",

@@ -59,8 +59,10 @@ namespace RealTargets.Features
 
             try
             {
-                bool alive = target.ActiveHealthController != null && target.ActiveHealthController.IsAlive;
-                if (alive || !Plugin.PushCorpses.Value)
+                // 1.2.1: a Fika client's copy of a bot read as dead here (null ActiveHealthController), so every hit on a
+                // living one woke its ragdoll, and one that died inside the wake window fell through the map. Only
+                // bodies this machine simulates are pushed; their owner's push reaches the copies through Fika's sync.
+                if (Targets.IsAlive(target) || !Targets.OwnsBody(target) || !Plugin.PushCorpses.Value)
                 {
                     return;
                 }
@@ -157,6 +159,7 @@ namespace RealTargets.Features
         {
             try
             {
+                if (!Targets.OwnsBody(target)) return;
                 var rb = BodyAt(target, (EBodyPartColliderType)(-1), point);
                 if (rb == null) return;
                 if (rb.isKinematic && (!corpse || !Plugin.PushCorpses.Value || !WakeCorpse(target))) return;

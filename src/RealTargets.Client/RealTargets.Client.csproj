@@ -6,7 +6,7 @@
     <AssemblyName>RealTargets</AssemblyName>
     <RootNamespace>RealTargets</RootNamespace>
     <!-- Keep in sync with PluginInfo.Version. -->
-    <Version>1.2.0</Version>
+    <Version>1.2.1</Version>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
@@ -89,13 +89,18 @@
     <MakeDir Directories="$(DeployDir)" />
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(DeployDir)" />
     <Copy Condition="'$(Public)' != 'true'" SourceFiles="$(MSBuildProjectDirectory)\Lab\testkit.json" DestinationFolder="$(DeployDir)" />
+    <!-- Translations (1.2.1: ru). en.json stays out: the dev build exports its own at start. -->
+    <ItemGroup>
+      <RtTranslation Include="$(MSBuildProjectDirectory)\locales\*.json" Exclude="$(MSBuildProjectDirectory)\locales\en.json" />
+    </ItemGroup>
+    <Copy SourceFiles="@(RtTranslation)" DestinationFolder="$(DeployDir)\locales" />
     <Message Importance="high" Text="RealTargets deployed -> $(DeployDir)" />
   </Target>
 
   <!--
     Release zip (Forge rules: install-ready from the SPT root, LICENSE inside):
       dist/stompa-RealTargets-<Version>.zip
-        BepInEx/plugins/RealTargets/RealTargets.dll, LICENSE, README.md
+        BepInEx/plugins/RealTargets/RealTargets.dll, LICENSE, README.md, locales/*.json
   -->
   <Target Name="PackageRelease" AfterTargets="Build" Condition="'$(Package)' == 'true'">
     <Error Condition="'$(Public)' != 'true'" Text="Package=true needs the public build: dotnet build -c Public -p:Package=true" />
@@ -112,8 +117,12 @@
     <RemoveDir Directories="$(PackageStage)" />
     <MakeDir Directories="$(PackagePluginDir);$(DistDir)" />
     <Copy SourceFiles="$(TargetPath);$(RepoRoot)\LICENSE;$(RtReadme)" DestinationFolder="$(PackagePluginDir)" />
-    <!-- 1.2.0: the translators' template (English is also built in); a translation is another <code>.json there. -->
-    <Copy SourceFiles="$(MSBuildProjectDirectory)\locales\en.json" DestinationFolder="$(PackagePluginDir)\locales" />
+    <!-- en.json = the translators' template (English is also built in); every other locales\<code>.json is a shipped
+         translation (1.2.1: ru). -->
+    <ItemGroup>
+      <RtLocale Include="$(MSBuildProjectDirectory)\locales\*.json" />
+    </ItemGroup>
+    <Copy SourceFiles="@(RtLocale)" DestinationFolder="$(PackagePluginDir)\locales" />
     <Delete Files="$(PackageZip)" />
     <ZipDirectory SourceDirectory="$(PackageStage)" DestinationFile="$(PackageZip)" />
     <Message Importance="high" Text="RealTargets package -> $(PackageZip)" />

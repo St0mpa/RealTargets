@@ -100,17 +100,21 @@ namespace RealTargets.Gore
         {
             Instance = this;
             HitCollector.PublishedVolley += OnVolley;
+            Player.OnPlayerDeadStatic += OnPlayerDead;
         }
 
         private void OnDestroy()
         {
             HitCollector.PublishedVolley -= OnVolley;
+            Player.OnPlayerDeadStatic -= OnPlayerDead;
             ResetRaid();
         }
 
         internal void ResetRaid()
         {
             _limbHits.Clear();
+            _remoteHits.Clear();
+            _remoteDeaths.Clear();
             foreach (var body in _bodies.Values) Restore(body);
             _bodies.Clear();
             while (_pieces.Count > 0)
@@ -129,15 +133,19 @@ namespace RealTargets.Gore
             {
                 return;
             }
+            bool owned = Targets.OwnsBody(target);
             if (volley.Status == HitStatus.Alive)
             {
-                RememberLimbHits(volley);
+                if (owned) RememberLimbHits(volley);
+                else HoldRemote(volley);
                 return;
             }
 
             try
             {
-                bool corpse = volley.Status == HitStatus.Corpse;
+                // On a Fika client the host's death can also land before our own copy of the bullet does (it flies the
+                // shot again from the ShotInfoPacket): a body that died a moment ago still takes this as the killing shot.
+                bool corpse = volley.Status == HitStatus.Corpse && (owned || !DiedJustNow(target));
                 TryHead(volley, corpse);
                 TryLimbs(volley, corpse);
             }
@@ -271,6 +279,61 @@ namespace RealTargets.Gore
             }
         }
 
+        // 1.2.1 (Fika headless report, 2026-11-19: "never saw a decapitation" as a client): on a Fika client the host owns
+        // every bot, so the death arrives by health sync a network round trip after our copy of the hit, and the killing
+        // shot reads Alive. With a headless host every human is a client, so nobody saw head or limb gore on a kill.
+        // A volley on a living body this machine doesn't own is held for RemoteDeathWindow (ping + Fika's send tick); if
+        // the body dies inside it, the latest held volley runs the head and limb rules as the killing shot. Only the latest
+        // per body: an earlier hit the bot survived (a helmet stop) must not take the head when a later one kills.
+        private const float RemoteDeathWindow = 1.5f;
+        private readonly List<(HitVolley volley, float time)> _remoteHits = new List<(HitVolley, float)>();
+        private readonly Dictionary<int, float> _remoteDeaths = new Dictionary<int, float>();
+
+        private void HoldRemote(HitVolley volley)
+        {
+            int id = volley.Target.Id;
+            _remoteHits.RemoveAll(h => h.volley.Target == null || h.volley.Target.Id == id);
+            _remoteHits.Add((volley, Time.time));
+        }
+
+        private void OnPlayerDead(Player player, IPlayer aggressor, EFT.Ballistics.DamageInfo damageInfo, EBodyPart part)
+        {
+            if (player != null && !Targets.OwnsBody(player)) _remoteDeaths[player.Id] = Time.time;
+        }
+
+        private bool DiedJustNow(Player player) =>
+            _remoteDeaths.TryGetValue(player.Id, out float at) && Time.time - at <= RemoteDeathWindow;
+
+        /// <summary>Held volleys on bodies this machine doesn't own whose bot died within the window: the killing shot.</summary>
+        private void RemoteDeaths()
+        {
+            float now = Time.time;
+            for (int i = _remoteHits.Count - 1; i >= 0; i--)
+            {
+                var (volley, time) = _remoteHits[i];
+                var target = volley.Target;
+                // HealthController null = unknown, not dead (the 1.2.0 client bug read a null as dead).
+                bool dead = target != null && target.HealthController != null && !target.HealthController.IsAlive;
+                if (!dead && target != null && now - time <= RemoteDeathWindow) continue;
+                _remoteHits.RemoveAt(i);
+                if (!dead || !Plugin.GoreEnabled.Value) continue;
+                try
+                {
+                    if (Plugin.LogBlood.Value)
+                    {
+                        Plugin.Log.LogInfo($"[Gore] {target.Profile?.Nickname}: died {now - time:F2} s after a hit on a body this machine " +
+                                           "doesn't own (Fika copy): that hit is the killing shot");
+                    }
+                    TryHead(volley, corpse: false);
+                    TryLimbs(volley, corpse: false);
+                }
+                catch (System.Exception ex)
+                {
+                    Plugin.Log.LogError($"Dismemberment (remote death): {ex}");
+                }
+            }
+        }
+
         private void TryLimbs(HitVolley volley, bool corpse)
         {
             foreach (var p in volley.Projectiles)
@@ -307,8 +370,8 @@ namespace RealTargets.Gore
             float scale = Mathf.Pow(tntKg / 0.11f, 1f / 3f) * Plugin.BlastLimbRange.Value;
             foreach (var player in Singleton<GameWorld>.Instance.AllPlayersEverExisted.ToList())
             {
-                if (player == null || !Hits.Targets.IsBot(player) || player.IsYourPlayer || player.ActiveHealthController == null ||
-                    player.ActiveHealthController.IsAlive || player.PlayerBones == null)
+                if (player == null || !Hits.Targets.IsBot(player) || player.IsYourPlayer || player.HealthController == null ||
+                    Hits.Targets.IsAlive(player) || player.PlayerBones == null)
                 {
                     continue;
                 }
@@ -1658,6 +1721,7 @@ namespace RealTargets.Gore
         {
             using var perf = RealTargets.Diagnostics.Perf.Measure(RealTargets.Diagnostics.PerfArea.Gore);
             if (_limbHits.Count > 0) LateDeaths();
+            if (_remoteHits.Count > 0) RemoteDeaths();
             if (_bodies.Count == 0) return;
             _release.Clear();
             foreach (var pair in _bodies)
